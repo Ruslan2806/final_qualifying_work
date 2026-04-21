@@ -322,7 +322,7 @@ class MainWindow(QMainWindow):
                 for x_off in range(-w_img // 2, w_img // 2, 20):
                     f_px = fh / cam_h
                     angle = np.arctan(x_off / f_px)
-                    y_adj = int(fh / (d / np.cos(angle)) + y_horizon)
+                    y_adj = int(fh / (d * np.cos(angle)) + y_horizon)
                     if 0 <= y_adj < h_img: pts.append([cx + x_off, y_adj])
                 if len(pts) > 1:
                     cv2.polylines(result, [np.array(pts, np.int32)], False, (0, 0, 255), 2)
