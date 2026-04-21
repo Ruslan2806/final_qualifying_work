@@ -31,7 +31,7 @@ class ImageLabel(QLabel):
         self.points = []
         self.pending_y = None
         self._pixmap_src = None
-        self.locked = False # Блокировка кликов в режиме результата
+        self.locked = False # Блокировка выбора точек в режиме результата
         
         self.dragging = False
         self.last_mouse_pos = QPoint()
@@ -72,7 +72,7 @@ class ImageLabel(QLabel):
         if event.angleDelta().y() > 0: self.zoom_factor *= 1.15
         else: self.zoom_factor /= 1.15
         
-        self.zoom_factor = max(0.5, min(self.zoom_factor, 15.0))
+        self.zoom_factor = max(0.5, min(self.zoom_factor, 20.0))
         if old_zoom == self.zoom_factor: return
 
         ratio = self.zoom_factor / old_zoom
@@ -85,19 +85,21 @@ class ImageLabel(QLabel):
             sa.verticalScrollBar().setValue(int(sa.verticalScrollBar().value() + delta.y()))
 
     def mousePressEvent(self, event):
-        if self.locked: return # В режиме результата клики не работают
+        # ПКМ (Перемещение) работает ВСЕГДА
+        if event.button() == Qt.RightButton:
+            self.dragging = True
+            self.last_mouse_pos = event.globalPos()
+            self.setCursor(Qt.ClosedHandCursor)
+            return
 
-        if event.button() == Qt.LeftButton and self._pixmap_src:
+        # ЛКМ (Выбор точки) работает только если не LOCKED
+        if not self.locked and event.button() == Qt.LeftButton and self._pixmap_src:
             s = self._get_current_total_scale()
             cx = self.width() // 2
             if abs(event.x() - cx) <= 40:
                 self.pending_y = int(event.y() / s)
                 self.update()
                 self.pointSelected.emit(self.pending_y)
-        elif event.button() == Qt.RightButton:
-            self.dragging = True
-            self.last_mouse_pos = event.globalPos()
-            self.setCursor(Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
         if self.dragging:
@@ -108,11 +110,14 @@ class ImageLabel(QLabel):
             if sa:
                 sa.horizontalScrollBar().setValue(sa.horizontalScrollBar().value() - delta.x())
                 sa.verticalScrollBar().setValue(sa.verticalScrollBar().value() - delta.y())
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.RightButton:
             self.dragging = False
-            self.setCursor(Qt.CrossCursor)
+            # Возвращаем курсор в зависимости от режима
+            self.setCursor(Qt.ArrowCursor if self.locked else Qt.CrossCursor)
 
     def paintEvent(self, event):
         if self._pixmap_src is None: return
@@ -120,6 +125,7 @@ class ImageLabel(QLabel):
         s = self._get_current_total_scale()
         painter.drawPixmap(0, 0, self.width(), self.height(), self._pixmap_src)
         
+        # Отрисовка разметки калибровки только в активном режиме
         if not self.locked:
             cx = self.width() // 2
             painter.setPen(QPen(QColor(0, 255, 0, 120), 2))
@@ -143,8 +149,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Калибровка камеры")
-        self.image = None       # Оригинал CV2
-        self.pixmap_orig = None # Оригинал QPixmap
+        self.image = None
+        self.pixmap_orig = None
         self.points = []
         self.calibrated = False
 
@@ -156,7 +162,6 @@ class MainWindow(QMainWindow):
         root = QHBoxLayout(central)
         root.setContentsMargins(15, 15, 15, 15)
 
-        # ─── Левая часть ───
         self.img_label = ImageLabel()
         self.img_label.pointSelected.connect(self.on_point_selected)
         
@@ -170,7 +175,6 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         root.addWidget(scroll, stretch=4)
 
-        # ─── Правая часть ───
         ctrl = QVBoxLayout()
         root.addLayout(ctrl, stretch=1)
 
@@ -180,25 +184,20 @@ class MainWindow(QMainWindow):
         btn_load.setStyleSheet(self._btn_style("#444"))
         ctrl.addWidget(btn_load)
 
-        # Группа параметров
         grp_params = QGroupBox("Параметры")
         grp_params.setStyleSheet(self._grp_style())
         params_layout = QGridLayout(grp_params)
-        
         params_layout.addWidget(QLabel("Высота (м):"), 0, 0)
         self.edit_h = QLineEdit(str(DEFAULT_CAMERA_HEIGHT))
         params_layout.addWidget(self.edit_h, 0, 1)
-
         params_layout.addWidget(QLabel("Шаг (м):"), 1, 0)
         self.edit_step = QLineEdit(str(DEFAULT_GRID_STEP))
         params_layout.addWidget(self.edit_step, 1, 1)
-
         params_layout.addWidget(QLabel("Макс. (м):"), 2, 0)
         self.edit_max = QLineEdit(str(DEFAULT_MAX_DISTANCE))
         params_layout.addWidget(self.edit_max, 2, 1)
         ctrl.addWidget(grp_params)
 
-        # Группа добавления
         self.grp_add = QGroupBox("1. Точка")
         self.grp_add.setStyleSheet(self._grp_style())
         add_layout = QVBoxLayout(self.grp_add)
@@ -212,7 +211,6 @@ class MainWindow(QMainWindow):
         add_layout.addWidget(self.btn_add)
         ctrl.addWidget(self.grp_add)
 
-        # Список точек
         self.grp_pts = QGroupBox("2. Список")
         self.grp_pts.setStyleSheet(self._grp_style())
         pts_layout = QVBoxLayout(self.grp_pts)
@@ -223,14 +221,12 @@ class MainWindow(QMainWindow):
         pts_layout.addWidget(self.btn_undo)
         ctrl.addWidget(self.grp_pts)
 
-        # Кнопка расчета
         self.btn_build = QPushButton("РАССЧИТАТЬ")
         self.btn_build.setEnabled(False); self.btn_build.setFixedHeight(50)
         self.btn_build.clicked.connect(self.handle_build_click)
         self.btn_build.setStyleSheet(self._btn_style("#8e44ad"))
         ctrl.addWidget(self.btn_build)
 
-        # Метка для графика
         self.plot_label = QLabel()
         self.plot_label.setAlignment(Qt.AlignCenter)
         ctrl.addWidget(self.plot_label)
@@ -238,7 +234,7 @@ class MainWindow(QMainWindow):
         ctrl.addStretch()
 
     def load_image_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Выбрать фото для калибровки", "", "Images (*.jpg *.png *.jpeg)")
+        path, _ = QFileDialog.getOpenFileName(self, "Выбрать фото", "", "Images (*.jpg *.png *.jpeg)")
         if path:
             self.image = cv2.imread(path)
             if self.image is None: return
@@ -248,7 +244,14 @@ class MainWindow(QMainWindow):
             qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888)
             self.pixmap_orig = QPixmap.fromImage(qimg)
             self.img_label.set_source_pixmap(self.pixmap_orig, base_scale)
+            self.img_label.locked = False
+            self.img_label.setCursor(Qt.CrossCursor)
+            self.btn_build.setText("РАССЧИТАТЬ")
+            self.calibrated = False
             self.points = []
+            self.plot_label.clear()
+            self.grp_add.setVisible(True)
+            self.grp_pts.setVisible(True)
             self._refresh_ui()
 
     def on_point_selected(self, y_orig):
@@ -279,9 +282,9 @@ class MainWindow(QMainWindow):
         if not self.calibrated:
             self.build_calibration()
         else:
-            # Сброс в режим калибровки
             self.calibrated = False
             self.img_label.locked = False
+            self.img_label.setCursor(Qt.CrossCursor)
             self.img_label.set_source_pixmap(self.pixmap_orig, self.img_label.base_scale)
             self.btn_build.setText("РАССЧИТАТЬ")
             self.plot_label.clear()
@@ -294,9 +297,8 @@ class MainWindow(QMainWindow):
             step = float(self.edit_step.text().replace(',', '.'))
             max_d = float(self.edit_max.text().replace(',', '.'))
         except:
-            QMessageBox.warning(self, "Ошибка", "Проверьте параметры (должны быть числами)"); return
+            QMessageBox.warning(self, "Ошибка", "Проверьте параметры"); return
 
-        # Математика
         dists_arr = np.array([p[0] for p in self.points])
         y_arr = np.array([p[1] for p in self.points])
         h_img, w_img = self.image.shape[:2]
@@ -305,9 +307,8 @@ class MainWindow(QMainWindow):
             popt, _ = curve_fit(lambda d, fh, yh: fh / d + yh, dists_arr, y_arr, p0=[500.0, h_img * 0.3])
             fh, y_horizon = popt
         except:
-            QMessageBox.critical(self, "Ошибка", "Не удалось подобрать модель"); return
+            QMessageBox.critical(self, "Ошибка", "Ошибка построения модели"); return
 
-        # Генерация сетки (КРАСНАЯ)
         result = self.image.copy()
         cx = w_img // 2
         grid_data = {}
@@ -324,42 +325,33 @@ class MainWindow(QMainWindow):
                     y_adj = int(fh / (d / np.cos(angle)) + y_horizon)
                     if 0 <= y_adj < h_img: pts.append([cx + x_off, y_adj])
                 if len(pts) > 1:
-                    cv2.polylines(result, [np.array(pts, np.int32)], False, (0, 0, 255), 2) # КРАСНЫЙ (BGR)
+                    cv2.polylines(result, [np.array(pts, np.int32)], False, (0, 0, 255), 2)
                     cv2.putText(result, f"{d:.1f}m", (20, y_c - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # Сохранение фото и JSON
         cv2.imwrite("calibration_grid.jpg", result)
         data = {"fh": fh, "y_horizon": y_horizon, "camera_height_m": cam_h, "grid": grid_data}
         with open("calibration.json", "w", encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        # Создание графика
         plt.figure(figsize=(4, 3))
         d_plot = np.linspace(min(dists_arr)*0.8, max_d, 100)
         plt.plot(d_plot, fh / d_plot + y_horizon, 'b-', label='Модель')
         plt.scatter(dists_arr, y_arr, c='r', s=20)
         plt.grid(True); plt.tight_layout()
-        plt.savefig("calibration_curve.png", dpi=80)
-        plt.close()
+        plt.savefig("calibration_curve.png", dpi=80); plt.close()
 
-        # Обновление UI
         self.calibrated = True
         self.img_label.locked = True
+        self.img_label.setCursor(Qt.ArrowCursor) # Меняем курсор на обычный в режиме просмотра
         
-        # Показываем результат в главном окне
         rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
         q_res = QImage(rgb.data, w_img, h_img, rgb.strides[0], QImage.Format_RGB888)
         self.img_label.set_source_pixmap(QPixmap.fromImage(q_res), self.img_label.base_scale)
         
-        # Показываем график
         self.plot_label.setPixmap(QPixmap("calibration_curve.png"))
         self.btn_build.setText("РАССЧИТАТЬ ПОВТОРНО")
-        
-        # Прячем панели ввода, чтобы освободить место для графика
         self.grp_add.setVisible(False)
         self.grp_pts.setVisible(False)
-        
-        QMessageBox.information(self, "Готово", "Калибровка успешно завершена и сохранена!")
 
     @staticmethod
     def _btn_style(color):
