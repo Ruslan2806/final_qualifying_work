@@ -2,6 +2,8 @@
 venv/
 ENV/
 
+dataset/
+
 camera_calibration/*
 
 !camera_calibration/camera_calibration.py
