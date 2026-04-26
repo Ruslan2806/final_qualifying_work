@@ -2,6 +2,9 @@
 venv/
 ENV/
 
+neural_networks/yolov8/results
+neural_networks/yolov8/weights
+
 dataset/
 
 camera_calibration/*
