@@ -3,7 +3,7 @@ venv/
 ENV/
 
 neural_networks/yolov8/results
-neural_networks/yolov8/weights
+#neural_networks/yolov8/weights
 
 dataset/
 
