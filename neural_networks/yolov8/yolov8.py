@@ -1,26 +1,20 @@
 import os
 
-# Добавь эту строку в самом начале train(), до model.train()
 os.chdir(r"C:\Users\ruslan\Documents\GitHub\final_qualifying_work\dataset")
 import shutil
 from pathlib import Path
 import yaml
 
-# --- 1. КРИТИЧЕСКИЕ НАСТРОЙКИ ДЛЯ СОВМЕСТИМОСТИ С RTX 5050 (Blackwell) ---
-# Эти настройки должны быть ПЕРЕД импортом torch и ultralytics
 os.environ['TORCH_CUDA_ARCH_LIST'] = '9.0'
 os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
 
 import torch
-# Отключаем оптимизации, которые вызывают ошибку "no kernel image"
 torch.backends.cudnn.enabled = False
 torch.backends.cudnn.benchmark = False
 torch.backends.cuda.matmul.allow_tf32 = False
 
 from ultralytics import YOLO
 
-# ─── Settings ────────────────────────────────────────────
-# Используем .resolve(), чтобы пути всегда были корректными
 BASE_PATH     = Path(__file__).resolve().parent.parent.parent
 DATASET_YAML  = BASE_PATH / "dataset" / "data.yaml"
 MODELS_DIR    = Path(__file__).resolve().parent / "weights"
@@ -29,7 +23,7 @@ RESULTS_DIR   = Path(__file__).resolve().parent / "results"
 MODEL_NAME    = "yolov8n.pt"   
 EPOCHS        = 100            
 IMG_SIZE      = 640
-BATCH_SIZE    = 16             # Если будет ошибка памяти, снизьте до 8
+BATCH_SIZE    = 16             
 LEARNING_RATE = 0.01           
 DEVICE        = 0              
 # ─────────────────────────────────────────────────────────
@@ -42,7 +36,6 @@ def train():
     model = YOLO(MODEL_NAME)
 
     print(f"Starting training on: {DATASET_YAML}")
-    # ВАЖНО: Параметр amp=False — решение для ошибки кернелов на новых GPU
     results = model.train(
         data    = str(DATASET_YAML),
         epochs  = EPOCHS,
@@ -55,14 +48,14 @@ def train():
         exist_ok= True,
 
         # Аугментация
-        fliplr  = 0.0,   # Отключено, так как вы добавили копии вручную
+        fliplr  = 0.0,   
         hsv_v   = 0.6,   
         hsv_s   = 0.4,   
         mosaic  = 1.0,   
         
         # Настройки совместимости
-        amp     = False, # ПРИНУДИТЕЛЬНО ВЫКЛЮЧЕНО для RTX 5050
-        workers = 0,     # Ставим 0 для стабильности на Windows
+        amp     = False, 
+        workers = 0,     
         patience= 10,    
     )
 
