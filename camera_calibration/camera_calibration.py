@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
                     cv2.putText(result, f"{d:.1f}m", (20, y_c - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         cv2.imwrite("calibration_grid.jpg", result)
-        data = {"fh": fh, "y_horizon": y_horizon, "camera_height_m": cam_h, "grid": grid_data}
+        data = {"fh": fh, "y_horizon": y_horizon, "camera_height_m": cam_h, "image_height": h_img, "grid": grid_data}
         with open("calibration.json", "w", encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
