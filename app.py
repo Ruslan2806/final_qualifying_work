@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 from pathlib import Path
 
 os.environ['TORCH_CUDA_ARCH_LIST'] = '9.0'
@@ -17,19 +18,22 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QFileDialog,
                              QComboBox, QStackedWidget, QMessageBox, QProgressBar)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QPalette, QColor
 from ultralytics import YOLO
 
 BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
-MODEL_PATH       = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
-# = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
-# = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
-
+MODEL_PATH       = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
 
 def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
     fh        = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
+
+    frame_h = frame.shape[0]
+    calib_h = calib_data.get("image_height", frame_h)
+    scale   = frame_h / calib_h if calib_h > 0 else 1.0
+    fh_s    = fh * scale
+    yh_s    = y_horizon * scale
 
     results = model.predict(frame, conf=0.4, verbose=False, device=0)[0]
 
@@ -40,17 +44,15 @@ def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
         y_feet = y2
 
-        print(f"y_feet={y_feet}, y_horizon={y_horizon:.1f}, diff={y_feet - y_horizon:.1f}")
-
-        if y_feet > y_horizon:
-            distance = fh / (y_feet - y_horizon)
-            dist_text = f"{distance:.1f}m"
+        if y_feet > yh_s:
+            distance  = fh_s / (y_feet - yh_s)
+            dist_text = f"{distance:.1f}м"
         else:
             dist_text = "?"
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, f"Pedestrian {dist_text}",
-                    (x1, y1 - 10),
+                    (x1, max(y1 - 10, 15)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     return frame
@@ -70,13 +72,13 @@ class VideoWorker(QThread):
     def run(self):
         cap = cv2.VideoCapture(self.input_path)
         if not cap.isOpened():
-            self.error.emit("Не удалось открыть видеофайл")
+            self.error.emit("Не удалось открыть видеофайл.")
             return
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps    = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps          = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out    = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
@@ -114,7 +116,9 @@ class CameraWorker(QThread):
         while self._running:
             ret, frame = cap.read()
             if ret:
-                self.frame_ready.emit(process_frame(frame, self.model, self.calib_data))
+                self.frame_ready.emit(
+                    process_frame(frame, self.model, self.calib_data)
+                )
         cap.release()
 
     def stop(self):
@@ -124,12 +128,12 @@ class CameraWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Pedestrian Detection System")
+        self.setWindowTitle("Система детекции пешеходов")
         self.setGeometry(100, 100, 860, 640)
 
-        self.calib_data  = None
-        self.model       = None
-        self.cam_thread  = None
+        self.calib_data   = None
+        self.model        = None
+        self.cam_thread   = None
         self.video_thread = None
 
         if not self._load_resources():
@@ -144,95 +148,125 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(0)
 
     def _load_resources(self) -> bool:
-        if not CALIBRATION_PATH.exists():
-            QMessageBox.critical(
-                self, "Calibration missing",
-                f"calibration.json not found:\n{CALIBRATION_PATH}\n\n"
-                "Run camera_calibration.py first."
-            )
-            return False
-
         if not MODEL_PATH.exists():
             QMessageBox.critical(
-                self, "Model missing",
-                f"Model not found:\n{MODEL_PATH}"
+                self, "Модель не найдена",
+                f"Файл модели не найден:\n{MODEL_PATH}"
             )
             return False
 
         try:
-            with open(CALIBRATION_PATH, "r") as f:
-                self.calib_data = json.load(f)
             self.model = YOLO(str(MODEL_PATH))
-            return True
         except Exception as e:
-            QMessageBox.critical(self, "Load error", str(e))
+            QMessageBox.critical(self, "Ошибка загрузки модели", str(e))
             return False
 
+        if CALIBRATION_PATH.exists():
+            try:
+                with open(CALIBRATION_PATH, "r") as f:
+                    self.calib_data = json.load(f)
+            except Exception:
+                self.calib_data = None
+
+        return True
+
+    def _calibration_ready(self) -> bool:
+        if self.calib_data is None:
+            QMessageBox.warning(
+                self, "Требуется калибровка",
+                "Данные калибровки не найдены.\n\n"
+                "Сначала выполните калибровку камеры,\n"
+                "затем нажмите «Обновить калибровку»."
+            )
+            return False
+        return True
+
     def _build_menu(self):
-        w = QWidget()
+        w   = QWidget()
         lay = QVBoxLayout(w)
         lay.setAlignment(Qt.AlignCenter)
-        lay.setSpacing(20)
+        lay.setSpacing(14)
 
-        title = QLabel("Pedestrian Detection System")
+        title = QLabel("Система детекции пешеходов")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 26px; font-weight: bold;")
+        title.setStyleSheet("font-size: 26px; font-weight: bold; margin-bottom: 10px;")
         lay.addWidget(title)
 
-        sub = QLabel("Select operating mode")
-        sub.setAlignment(Qt.AlignCenter)
-        sub.setStyleSheet("font-size: 14px; color: #aaa;")
-        lay.addWidget(sub)
+        self.lbl_calib_status = QLabel()
+        self.lbl_calib_status.setAlignment(Qt.AlignCenter)
+        self.lbl_calib_status.setStyleSheet("font-size: 12px;")
+        self._update_calib_status_label()
+        lay.addWidget(self.lbl_calib_status)
 
-        btn_video = QPushButton("📹  Video file processing")
+        btn_video = QPushButton("📹  Обработка видеофайла")
         btn_video.setFixedSize(320, 60)
         btn_video.setStyleSheet(self._btn("#2980b9"))
-        btn_video.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+        btn_video.clicked.connect(self._go_video)
 
-        btn_cam = QPushButton("📷  Real-time camera")
+        btn_cam = QPushButton("📷  Камера в реальном времени")
         btn_cam.setFixedSize(320, 60)
         btn_cam.setStyleSheet(self._btn("#27ae60"))
-        btn_cam.clicked.connect(lambda: self.stack.setCurrentIndex(2))
+        btn_cam.clicked.connect(self._go_camera)
 
-        lay.addWidget(btn_video, alignment=Qt.AlignCenter)
-        lay.addWidget(btn_cam,   alignment=Qt.AlignCenter)
+        btn_calib = QPushButton("🎯  Калибровка камеры")
+        btn_calib.setFixedSize(320, 60)
+        btn_calib.setStyleSheet(self._btn("#8e44ad"))
+        btn_calib.clicked.connect(self._open_calibration)
+
+        btn_reload = QPushButton("🔄  Обновить калибровку")
+        btn_reload.setFixedSize(320, 40)
+        btn_reload.setStyleSheet(self._btn("#555"))
+        btn_reload.clicked.connect(self._reload_calibration)
+
+        lay.addWidget(btn_video,  alignment=Qt.AlignCenter)
+        lay.addWidget(btn_cam,    alignment=Qt.AlignCenter)
+        lay.addWidget(btn_calib,  alignment=Qt.AlignCenter)
+        lay.addWidget(btn_reload, alignment=Qt.AlignCenter)
 
         self.stack.addWidget(w)
 
+    def _update_calib_status_label(self):
+        if self.calib_data is not None:
+            self.lbl_calib_status.setText("✅  Калибровка загружена")
+            self.lbl_calib_status.setStyleSheet("font-size: 12px; color: #2ecc71;")
+        else:
+            self.lbl_calib_status.setText("⚠️  Калибровка не найдена — сначала выполните калибровку")
+            self.lbl_calib_status.setStyleSheet("font-size: 12px; color: #e74c3c;")
+
     def _build_video_screen(self):
-        w = QWidget()
+        w   = QWidget()
         lay = QVBoxLayout(w)
         lay.setSpacing(12)
         lay.setContentsMargins(20, 20, 20, 20)
 
         top = QHBoxLayout()
-        btn_back = QPushButton("← Back")
+        btn_back = QPushButton("← Назад")
         btn_back.setFixedWidth(90)
         btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
         top.addWidget(btn_back)
-        top.addWidget(QLabel("<h2>Video Processing</h2>"))
+        top.addWidget(QLabel("<h2>Обработка видео</h2>"))
         top.addStretch()
         lay.addLayout(top)
 
         row_in = QHBoxLayout()
-        self.lbl_in = QLabel("No file selected")
+        self.lbl_in = QLabel("Файл не выбран")
         self.lbl_in.setStyleSheet("color: #aaa;")
-        btn_in = QPushButton("Select input video")
+        btn_in = QPushButton("Выбрать входное видео")
         btn_in.clicked.connect(self._select_input)
         row_in.addWidget(btn_in)
         row_in.addWidget(self.lbl_in, stretch=1)
         lay.addLayout(row_in)
 
         row_out = QHBoxLayout()
-        self.lbl_out = QLabel("No output path selected")
+        self.lbl_out = QLabel("Путь сохранения не выбран")
         self.lbl_out.setStyleSheet("color: #aaa;")
-        btn_out = QPushButton("Select output path")
+        btn_out = QPushButton("Выбрать путь сохранения")
         btn_out.clicked.connect(self._select_output)
         row_out.addWidget(btn_out)
         row_out.addWidget(self.lbl_out, stretch=1)
         lay.addLayout(row_out)
 
-        self.btn_process = QPushButton("▶  Start processing")
+        self.btn_process = QPushButton("▶  Начать обработку")
         self.btn_process.setFixedHeight(48)
         self.btn_process.setStyleSheet(self._btn("#27ae60"))
         self.btn_process.clicked.connect(self._start_video)
@@ -246,33 +280,33 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(w)
 
     def _build_camera_screen(self):
-        w = QWidget()
+        w   = QWidget()
         lay = QVBoxLayout(w)
         lay.setSpacing(10)
         lay.setContentsMargins(20, 20, 20, 20)
 
         top = QHBoxLayout()
-        btn_back = QPushButton("← Back")
+        btn_back = QPushButton("← Назад")
         btn_back.setFixedWidth(90)
         btn_back.clicked.connect(self._stop_cam_and_back)
         top.addWidget(btn_back)
-        top.addWidget(QLabel("<h2>Real-time Detection</h2>"))
+        top.addWidget(QLabel("<h2>Детекция в реальном времени</h2>"))
         top.addStretch()
         lay.addLayout(top)
 
         cam_row = QHBoxLayout()
-        cam_row.addWidget(QLabel("Camera:"))
+        cam_row.addWidget(QLabel("Камера:"))
         self.combo_cam = QComboBox()
         self._detect_cameras()
         cam_row.addWidget(self.combo_cam)
-        self.btn_toggle = QPushButton("▶  Start")
+        self.btn_toggle = QPushButton("▶  Запустить")
         self.btn_toggle.setStyleSheet(self._btn("#27ae60"))
         self.btn_toggle.clicked.connect(self._toggle_camera)
         cam_row.addWidget(self.btn_toggle)
         cam_row.addStretch()
         lay.addLayout(cam_row)
 
-        self.lbl_feed = QLabel("Camera feed will appear here")
+        self.lbl_feed = QLabel("Здесь появится изображение с камеры")
         self.lbl_feed.setAlignment(Qt.AlignCenter)
         self.lbl_feed.setStyleSheet("background: #111; color: #555;")
         self.lbl_feed.setMinimumSize(640, 480)
@@ -280,9 +314,45 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(w)
 
+    def _go_video(self):
+        if self._calibration_ready():
+            self.stack.setCurrentIndex(1)
+
+    def _go_camera(self):
+        if self._calibration_ready():
+            self.stack.setCurrentIndex(2)
+
+    def _open_calibration(self):
+        calib_script = BASE_PATH / "camera_calibration" / "camera_calibration.py"
+        if not calib_script.exists():
+            QMessageBox.critical(
+                self, "Ошибка",
+                f"Скрипт калибровки не найден:\n{calib_script}"
+            )
+            return
+        subprocess.Popen(
+            [sys.executable, str(calib_script)],
+            cwd=str(calib_script.parent)
+        )
+
+    def _reload_calibration(self):
+        if not CALIBRATION_PATH.exists():
+            QMessageBox.warning(
+                self, "Предупреждение",
+                "Файл calibration.json не найден.\nСначала выполните калибровку."
+            )
+            return
+        try:
+            with open(CALIBRATION_PATH, "r") as f:
+                self.calib_data = json.load(f)
+            self._update_calib_status_label()
+            QMessageBox.information(self, "Готово", "Калибровка успешно обновлена.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить калибровку:\n{e}")
+
     def _select_input(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select video", "", "Video (*.mp4 *.avi *.mov)"
+            self, "Выбрать видео", "", "Видео (*.mp4 *.avi *.mov)"
         )
         if path:
             self.lbl_in.setText(path)
@@ -290,7 +360,7 @@ class MainWindow(QMainWindow):
 
     def _select_output(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save output as", "output.mp4", "Video (*.mp4)"
+            self, "Сохранить как", "output.mp4", "Видео (*.mp4)"
         )
         if path:
             self.lbl_out.setText(path)
@@ -301,14 +371,14 @@ class MainWindow(QMainWindow):
         out_p = self.lbl_out.text()
 
         if not os.path.exists(in_p):
-            QMessageBox.warning(self, "Warning", "Select a valid input video first.")
+            QMessageBox.warning(self, "Предупреждение", "Сначала выберите корректный видеофайл.")
             return
-        if out_p in ("No output path selected", ""):
-            QMessageBox.warning(self, "Warning", "Select an output path first.")
+        if out_p in ("Путь сохранения не выбран", ""):
+            QMessageBox.warning(self, "Предупреждение", "Сначала выберите путь сохранения.")
             return
 
         self.btn_process.setEnabled(False)
-        self.btn_process.setText("Processing…")
+        self.btn_process.setText("Обработка…")
         self.progress.setValue(0)
 
         self.video_thread = VideoWorker(in_p, out_p, self.model, self.calib_data)
@@ -319,41 +389,41 @@ class MainWindow(QMainWindow):
 
     def _on_video_done(self, path: str):
         self.btn_process.setEnabled(True)
-        self.btn_process.setText("▶  Start processing")
+        self.btn_process.setText("▶  Начать обработку")
         self.progress.setValue(100)
-        QMessageBox.information(self, "Done", f"Saved to:\n{path}")
+        QMessageBox.information(self, "Готово", f"Видео сохранено:\n{path}")
 
     def _on_video_error(self, msg: str):
         self.btn_process.setEnabled(True)
-        self.btn_process.setText("▶  Start processing")
-        QMessageBox.critical(self, "Error", msg)
+        self.btn_process.setText("▶  Начать обработку")
+        QMessageBox.critical(self, "Ошибка", msg)
 
     def _detect_cameras(self):
         self.combo_cam.clear()
         for i in range(5):
             cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
             if cap.isOpened():
-                self.combo_cam.addItem(f"Camera {i}", i)
+                self.combo_cam.addItem(f"Камера {i}", i)
                 cap.release()
         if self.combo_cam.count() == 0:
-            self.combo_cam.addItem("No cameras found", -1)
+            self.combo_cam.addItem("Камеры не найдены", -1)
 
     def _toggle_camera(self):
         if self.cam_thread and self.cam_thread.isRunning():
             self.cam_thread.stop()
             self.cam_thread = None
-            self.btn_toggle.setText("▶  Start")
+            self.btn_toggle.setText("▶  Запустить")
             self.btn_toggle.setStyleSheet(self._btn("#27ae60"))
-            self.lbl_feed.setText("Camera stopped")
+            self.lbl_feed.setText("Камера остановлена")
         else:
             idx = self.combo_cam.currentData()
             if idx == -1:
-                QMessageBox.warning(self, "Warning", "No camera available.")
+                QMessageBox.warning(self, "Предупреждение", "Камеры недоступны.")
                 return
             self.cam_thread = CameraWorker(idx, self.model, self.calib_data)
             self.cam_thread.frame_ready.connect(self._update_feed)
             self.cam_thread.start()
-            self.btn_toggle.setText("⏹  Stop")
+            self.btn_toggle.setText("⏹  Остановить")
             self.btn_toggle.setStyleSheet(self._btn("#c0392b"))
 
     def _update_feed(self, frame: np.ndarray):
@@ -371,7 +441,7 @@ class MainWindow(QMainWindow):
         if self.cam_thread and self.cam_thread.isRunning():
             self.cam_thread.stop()
             self.cam_thread = None
-            self.btn_toggle.setText("▶  Start")
+            self.btn_toggle.setText("▶  Запустить")
             self.btn_toggle.setStyleSheet(self._btn("#27ae60"))
         self.stack.setCurrentIndex(0)
 
@@ -389,22 +459,21 @@ class MainWindow(QMainWindow):
             f"  font-weight: bold; padding: 6px 14px;"
             f"}}"
             f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
-            f"QPushButton:hover:enabled {{ background-color: {color}cc; }}"
+            f"QPushButton:hover:enabled {{ background-color: {color}dd; }}"
         )
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    from PyQt5.QtGui import QPalette, QColor
     pal = QPalette()
-    pal.setColor(QPalette.Window,        QColor(45, 45, 45))
-    pal.setColor(QPalette.WindowText,    QColor(220, 220, 220))
-    pal.setColor(QPalette.Base,          QColor(30, 30, 30))
-    pal.setColor(QPalette.Text,          QColor(220, 220, 220))
-    pal.setColor(QPalette.Button,        QColor(60, 60, 60))
-    pal.setColor(QPalette.ButtonText,    QColor(220, 220, 220))
-    pal.setColor(QPalette.Highlight,     QColor(80, 80, 200))
+    pal.setColor(QPalette.Window,          QColor(45,  45,  45))
+    pal.setColor(QPalette.WindowText,      QColor(220, 220, 220))
+    pal.setColor(QPalette.Base,            QColor(30,  30,  30))
+    pal.setColor(QPalette.Text,            QColor(220, 220, 220))
+    pal.setColor(QPalette.Button,          QColor(60,  60,  60))
+    pal.setColor(QPalette.ButtonText,      QColor(220, 220, 220))
+    pal.setColor(QPalette.Highlight,       QColor(80,  80,  200))
     pal.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
     app.setPalette(pal)
 
