@@ -26,23 +26,27 @@ CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
 # = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
 
-# История траекторий
-trajectories = {}  # {track_id: [(x, y, distance, timestamp), ...]}
-
-# Предыдущие расстояния для расчёта скорости
-prev_distances = {}  
+foot_history = {}
+prev_distances = {}
+speed_history = {}
+last_speed_update = {}
+display_speeds = {}
+trajectories = {}
 
 def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
     import time
+    import numpy as np
+    import cv2
 
-    fh        = calib_data["fh"]
+    fh = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
 
     frame_h = frame.shape[0]
     calib_h = calib_data.get("image_height", frame_h)
-    scale   = frame_h / calib_h if calib_h > 0 else 1.0
-    fh_s    = fh * scale
-    yh_s    = y_horizon * scale
+    scale = frame_h / calib_h if calib_h > 0 else 1.0
+
+    fh_s = fh * scale
+    yh_s = y_horizon * scale
 
     results = model.track(
         frame,
@@ -54,18 +58,45 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         amp=False
     )[0]
 
+    if results.boxes is None:
+        return frame
+
+    now = time.time()
+
     for box in results.boxes:
         if int(box.cls[0]) != 0:
             continue
 
-        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-
-        foot_x = (x1 + x2) // 2
-        foot_y = y2
-
         track_id = int(box.id[0]) if box.id is not None else -1
 
-        # РАССТОЯНИЕ
+        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+
+        # =========================
+        # FOOT POINT STABILIZATION
+        # =========================
+        foot_x = (x1 + x2) // 2
+        raw_foot_y = y2
+
+        if track_id == -1:
+            continue
+
+        if track_id not in foot_history:
+            foot_history[track_id] = []
+
+        foot_history[track_id].append(raw_foot_y)
+        if len(foot_history[track_id]) > 10:
+            foot_history[track_id].pop(0)
+
+        hist = foot_history[track_id]
+
+        median_y = np.median(hist)
+        ema_y = hist[-1] if len(hist) == 1 else (0.7 * hist[-1] + 0.3 * median_y)
+
+        foot_y = int(ema_y)
+
+        # =========================
+        # DISTANCE
+        # =========================
         if foot_y > yh_s:
             distance = fh_s / (foot_y - yh_s)
             dist_text = f"{distance:.1f}m"
@@ -73,53 +104,87 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
             distance = None
             dist_text = "?"
 
-        # СКОРОСТЬ
+        # =========================
+        # SPEED ESTIMATION
+        # =========================
         speed_text = ""
-        speed = 0.0
 
-        if distance is not None and track_id != -1:
-            if track_id in prev_distances:
+        if distance is not None:
+
+            if track_id not in prev_distances:
+                prev_distances[track_id] = distance
+                speed_history[track_id] = 0.0
+                display_speeds[track_id] = 0.0
+                last_speed_update[track_id] = now
+
+            else:
                 prev_d = prev_distances[track_id]
                 dt = 1.0 / fps if fps > 0 else 0.04
 
-                if dt > 0:
-                    speed = (prev_d - distance) / dt  # м/с
-                    speed_kmh = speed * 3.6
-                    speed_text = f"{speed_kmh:+.1f} km/h"
-                else:
-                    speed_text = "0.0 km/h"
-            else:
-                speed_text = "0.0 km/h"
+                delta = prev_d - distance
 
-            prev_distances[track_id] = distance
+                # ---- DEAD ZONE (noise removal) ----
+                if abs(delta) < 0.03:
+                    delta = 0.0
 
-        # ТРАЕКТОРИЯ 
-        if track_id != -1 and distance is not None:
-            if track_id not in trajectories:
-                trajectories[track_id] = []
+                raw_speed = delta / dt if dt > 0 else 0.0
 
-            trajectories[track_id].append((foot_x, foot_y, distance, time.time()))
+                # ---- ACCELERATION LIMIT ----
+                prev_speed = speed_history.get(track_id, 0.0)
+                max_change = 2.5  # m/s per frame step
 
-            if len(trajectories[track_id]) > 70:
-                trajectories[track_id] = trajectories[track_id][-50:]
+                raw_speed = np.clip(
+                    raw_speed,
+                    prev_speed - max_change,
+                    prev_speed + max_change
+                )
 
-        # РИСОВАНИЕ
+                # ---- EMA smoothing ----
+                alpha = 0.2
+                speed_history[track_id] = (
+                    raw_speed if track_id not in speed_history
+                    else alpha * raw_speed + (1 - alpha) * speed_history[track_id]
+                )
 
-        # bbox
+                smooth_speed = speed_history[track_id]
+
+                # ---- 0.5 sec display update hold ----
+                if (
+                    track_id not in last_speed_update or
+                    now - last_speed_update[track_id] > 0.5
+                ):
+                    display_speeds[track_id] = smooth_speed
+                    last_speed_update[track_id] = now
+
+                speed = display_speeds[track_id]
+                speed_text = f"{speed * 3.6:+.1f} km/h"
+
+                prev_distances[track_id] = distance
+
+        # =========================
+        # TRAJECTORY
+        # =========================
+        if track_id not in trajectories:
+            trajectories[track_id] = []
+
+        trajectories[track_id].append((foot_x, foot_y, now))
+
+        if len(trajectories[track_id]) > 70:
+            trajectories[track_id] = trajectories[track_id][-50:]
+
+        # =========================
+        # DRAWING
+        # =========================
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # траектория
         if track_id in trajectories:
             pts = [(p[0], p[1]) for p in trajectories[track_id][-30:]]
-
             for i in range(1, len(pts)):
                 cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
 
-        # текст
-        if track_id != -1:
-            label = f"id {track_id} | {dist_text} | s{speed_text}"
-        else:
-            label = dist_text
+        label = f"id {track_id} | {dist_text}"
+        if speed_text:
+            label += f" | v {speed_text}"
 
         cv2.putText(
             frame,
@@ -130,6 +195,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
             (0, 0, 139),
             2
         )
+        print(label)
 
     return frame
 
