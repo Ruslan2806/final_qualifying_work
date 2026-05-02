@@ -38,7 +38,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
 
     results = model.track(frame, conf=0.4, verbose=False, 
                       device=0, tracker="bytetrack.yaml", 
-                      persist=True)[0]
+                      persist=True, amp=False)[0]
 
     for box in results.boxes:
         if int(box.cls[0]) != 0:
