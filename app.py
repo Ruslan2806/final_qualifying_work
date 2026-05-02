@@ -36,7 +36,9 @@ def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
     fh_s    = fh * scale
     yh_s    = y_horizon * scale
 
-    results = model.predict(frame, conf=0.4, verbose=False, device=0)[0]
+    results = model.track(frame, conf=0.4, verbose=False, 
+                      device=0, tracker="bytetrack.yaml", 
+                      persist=True)[0]
 
     for box in results.boxes:
         if int(box.cls[0]) != 0:
@@ -52,7 +54,11 @@ def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
             dist_text = "?"
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"Pedestrian {dist_text}",
+
+        track_id = int(box.id[0]) if box.id is not None else -1
+        label = f"#{track_id}: {dist_text}" if track_id != -1 else dist_text
+
+        cv2.putText(frame, label,
                     (x1, max(y1 - 10, 15)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
