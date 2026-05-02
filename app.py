@@ -26,7 +26,15 @@ CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
 # = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
 
-def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
+# История траекторий
+trajectories = {}  # {track_id: [(x, y, distance, timestamp), ...]}
+
+# Предыдущие расстояния для расчёта скорости
+prev_distances = {}  
+
+def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
+    import time
+
     fh        = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
 
@@ -36,31 +44,92 @@ def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
     fh_s    = fh * scale
     yh_s    = y_horizon * scale
 
-    results = model.track(frame, conf=0.4, verbose=False, 
-                      device=0, tracker="bytetrack.yaml", 
-                      persist=True, amp=False)[0]
+    results = model.track(
+        frame,
+        conf=0.4,
+        verbose=False,
+        device=0,
+        tracker="bytetrack.yaml",
+        persist=True,
+        amp=False
+    )[0]
 
     for box in results.boxes:
         if int(box.cls[0]) != 0:
             continue
 
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-        y_feet = y2
 
-        if y_feet > yh_s:
-            distance  = fh_s / (y_feet - yh_s)
-            dist_text = f"{distance:.1f}m"
-        else:
-            dist_text = "?"
-
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        foot_x = (x1 + x2) // 2
+        foot_y = y2
 
         track_id = int(box.id[0]) if box.id is not None else -1
-        label = f"#{track_id}: {dist_text}" if track_id != -1 else dist_text
 
-        cv2.putText(frame, label,
-                    (x1, max(y1 - 10, 15)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # РАССТОЯНИЕ
+        if foot_y > yh_s:
+            distance = fh_s / (foot_y - yh_s)
+            dist_text = f"{distance:.1f}m"
+        else:
+            distance = None
+            dist_text = "?"
+
+        # СКОРОСТЬ
+        speed_text = ""
+        speed = 0.0
+
+        if distance is not None and track_id != -1:
+            if track_id in prev_distances:
+                prev_d = prev_distances[track_id]
+                dt = 1.0 / fps if fps > 0 else 0.04
+
+                if dt > 0:
+                    speed = (prev_d - distance) / dt  # м/с
+                    speed_kmh = speed * 3.6
+                    speed_text = f"{speed_kmh:+.1f} km/h"
+                else:
+                    speed_text = "0.0 km/h"
+            else:
+                speed_text = "0.0 km/h"
+
+            prev_distances[track_id] = distance
+
+        # ТРАЕКТОРИЯ 
+        if track_id != -1 and distance is not None:
+            if track_id not in trajectories:
+                trajectories[track_id] = []
+
+            trajectories[track_id].append((foot_x, foot_y, distance, time.time()))
+
+            if len(trajectories[track_id]) > 70:
+                trajectories[track_id] = trajectories[track_id][-50:]
+
+        # РИСОВАНИЕ
+
+        # bbox
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        # траектория
+        if track_id in trajectories:
+            pts = [(p[0], p[1]) for p in trajectories[track_id][-30:]]
+
+            for i in range(1, len(pts)):
+                cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
+
+        # текст
+        if track_id != -1:
+            label = f"id {track_id} | {dist_text} | s{speed_text}"
+        else:
+            label = dist_text
+
+        cv2.putText(
+            frame,
+            label,
+            (x1, max(y1 - 10, 15)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 139),
+            2
+        )
 
     return frame
 
@@ -76,33 +145,49 @@ class VideoWorker(QThread):
         self.model       = model
         self.calib_data  = calib_data
 
-    def run(self):
-        cap = cv2.VideoCapture(self.input_path)
-        if not cap.isOpened():
-            self.error.emit("Не удалось открыть видеофайл.")
-            return
+def run(self):
+    cap = cv2.VideoCapture(self.input_path)
+    if not cap.isOpened():
+        self.error.emit("Не удалось открыть видеофайл.")
+        return
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps          = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps          = cap.get(cv2.CAP_PROP_FPS)
 
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out    = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
+    if not fps or fps <= 1:
+        fps = 25.0  
 
-        processed = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            out.write(process_frame(frame, self.model, self.calib_data))
-            processed += 1
-            if total_frames > 0:
-                self.progress_changed.emit(int(processed / total_frames * 100))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out    = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
 
-        cap.release()
-        out.release()
-        self.finished.emit(self.output_path)
+    processed = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        processed_frame = process_frame(
+            frame,
+            self.model,
+            self.calib_data,
+            fps
+        )
+
+        out.write(processed_frame)
+
+        processed += 1
+
+        if total_frames > 0:
+            progress = int(processed / total_frames * 100)
+            self.progress_changed.emit(progress)
+
+    cap.release()
+    out.release()
+
+    self.finished.emit(self.output_path)
 
 
 class CameraWorker(QThread):
@@ -119,13 +204,24 @@ class CameraWorker(QThread):
         cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             return
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 1:
+            fps = 30.0  
+
         self._running = True
+
         while self._running:
             ret, frame = cap.read()
             if ret:
-                self.frame_ready.emit(
-                    process_frame(frame, self.model, self.calib_data)
+                processed = process_frame(
+                    frame,
+                    self.model,
+                    self.calib_data,
+                    fps
                 )
+                self.frame_ready.emit(processed)
+
         cap.release()
 
     def stop(self):
