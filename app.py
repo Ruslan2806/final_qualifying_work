@@ -26,28 +26,22 @@ CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
 # = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
 
-foot_history = {}
-prev_distances = {}
-speed_history = {}
-last_speed_update = {}
-display_speeds = {}
-trajectories = {}
-kalman_states = {} 
-kalman_covs = {}   
+foot_history    = {}
+prev_distances  = {}
+speed_state     = {}
+trajectories    = {}
+kalman_states   = {}
+kalman_covs     = {}
 
 def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
-    import time
-    import numpy as np
-
-    fh = calib_data["fh"]
+    fh        = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
 
     frame_h = frame.shape[0]
     calib_h = calib_data.get("image_height", frame_h)
-    scale = frame_h / calib_h if calib_h > 0 else 1.0
-
-    fh_s = fh * scale
-    yh_s = y_horizon * scale
+    scale   = frame_h / calib_h if calib_h > 0 else 1.0
+    fh_s    = fh * scale
+    yh_s    = y_horizon * scale
 
     results = model.track(
         frame,
@@ -62,22 +56,24 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
     if results.boxes is None:
         return frame
 
-    dt = 1.0 / max(fps, 1e-5)
+    dt       = 1.0 / max(fps, 1e-5)
+    alpha    = 0.2        # EMA коэффициент для скорости
+    sigma_a  = 0.5        # предполагаемое ускорение (м/с²)
+    deadband = 0.3       # мертвая зона измерений (3 см)
 
-    # =========================
-    # KALMAN MATRICES
-    # =========================
+    # ── Kalman матрицы ────────────────────────────────────────────────────────
     F = np.array([
         [1, dt],
-        [0, 1]
+        [0,  1]
     ], dtype=np.float32)
 
     H = np.array([[1, 0]], dtype=np.float32)
 
+    # Физически корректный process noise с моделью ускорения
     Q = np.array([
-        [1e-3, 0],
-        [0, 1e-2]
-    ], dtype=np.float32)
+        [dt**4 / 4, dt**3 / 2],
+        [dt**3 / 2, dt**2]
+    ], dtype=np.float32) * sigma_a**2
 
     R = np.array([[0.05]], dtype=np.float32)
 
@@ -90,71 +86,91 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         if track_id == -1:
             continue
 
-        foot_x = (x1 + x2) // 2
+        foot_x   = (x1 + x2) // 2
         raw_foot_y = y2
 
-        # =========================
-        # distance measurement
-        # =========================
+        # ── Измерение расстояния ──────────────────────────────────────────────
         if raw_foot_y > yh_s:
-            z = fh_s / (raw_foot_y - yh_s)
+            z_raw = fh_s / (raw_foot_y - yh_s)
         else:
-            z = None
+            z_raw = None
 
-        # =========================
-        # INIT KALMAN
-        # =========================
-        if track_id not in kalman_states:
-            kalman_states[track_id] = np.array([z if z is not None else 0.0, 0.0], dtype=np.float32)
-            kalman_covs[track_id] = np.eye(2, dtype=np.float32)
-
-        if z is None:
+        if z_raw is None:
             continue
+
+        # ── Deadband: игнорируем микро-дрожание bbox ──────────────────────────
+        if track_id in kalman_states:
+            prev_z = float(kalman_states[track_id][0])
+            z = prev_z if abs(z_raw - prev_z) < deadband else z_raw
+        else:
+            z = z_raw
+
+        # ── Инициализация Kalman ──────────────────────────────────────────────
+        if track_id not in kalman_states:
+            kalman_states[track_id] = np.array([z, 0.0], dtype=np.float32)
+            kalman_covs[track_id]   = np.eye(2, dtype=np.float32)
+            prev_distances[track_id] = z
+            speed_state[track_id]    = 0.0
 
         x = kalman_states[track_id]
         P = kalman_covs[track_id]
 
-        # =========================
-        # PREDICT
-        # =========================
+        # ── Predict ───────────────────────────────────────────────────────────
         x = F @ x
         P = F @ P @ F.T + Q
 
-        # =========================
-        # UPDATE
-        # =========================
+        # ── Update ────────────────────────────────────────────────────────────
         z_vec = np.array([z], dtype=np.float32)
-        y = z_vec - (H @ x)
-        S = H @ P @ H.T + R
-        K = P @ H.T @ np.linalg.inv(S)
-
-        x = x + (K @ y).flatten()
-        P = (np.eye(2) - K @ H) @ P
+        inn   = z_vec - (H @ x)           # innovation
+        S     = H @ P @ H.T + R
+        K     = P @ H.T @ np.linalg.inv(S)
+        x     = x + (K @ inn).flatten()
+        P     = (np.eye(2) - K @ H) @ P
 
         kalman_states[track_id] = x
-        kalman_covs[track_id] = P
+        kalman_covs[track_id]   = P
 
         distance = float(x[0])
-        speed = float(x[1])
 
-        # =========================
-        # DRAW
-        # =========================
+        # ── Скорость: Δdistance → EMA, не из x[1] ────────────────────────────
+        raw_speed = (distance - prev_distances[track_id]) * fps
+        prev_distances[track_id] = distance
+
+        speed_state[track_id] = (
+            alpha * raw_speed + (1 - alpha) * speed_state[track_id]
+        )
+        speed = speed_state[track_id]   # м/с, знак: «-» = приближается
+        if abs(speed) < 0.3:
+            speed = 0.0
+            
+        # ── Траектория ────────────────────────────────────────────────────────
+        if track_id not in trajectories:
+            trajectories[track_id] = []
+        trajectories[track_id].append((foot_x, raw_foot_y))
+        if len(trajectories[track_id]) > 60:          # последние 60 точек
+            trajectories[track_id].pop(0)
+
+        pts = trajectories[track_id]
+        for i in range(1, len(pts)):
+            cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
+
+        # ── Отрисовка ─────────────────────────────────────────────────────────
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        dist_text = f"{distance:.2f}m"
-        speed_text = f"{speed * 3.6:+.1f} km/h"
+        # Цвет скорости: красный = приближается, зелёный = удаляется
+        speed_color = (0, 0, 255) if speed < -0.1 else (0, 200, 0)
 
-        label = f"id {track_id} | {dist_text} | v {speed_text}"
+        dist_text  = f"{distance:.1f}m"
+        speed_kmh  = speed * 3.6
+        speed_text = f"{speed_kmh:+.1f}km/h"
+
+        label = f"#{track_id}  {dist_text}  {speed_text}"
 
         cv2.putText(
-            frame,
-            label,
+            frame, label,
             (x1, max(y1 - 10, 15)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 139),
-            2
+            0.55, speed_color, 2
         )
 
     return frame
