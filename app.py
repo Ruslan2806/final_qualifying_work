@@ -23,7 +23,8 @@ from ultralytics import YOLO
 
 BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
-MODEL_PATH       = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
+MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
+# = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
 
 def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
     fh        = calib_data["fh"]
@@ -46,7 +47,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict) -> np.ndarray:
 
         if y_feet > yh_s:
             distance  = fh_s / (y_feet - yh_s)
-            dist_text = f"{distance:.1f}м"
+            dist_text = f"{distance:.1f}m"
         else:
             dist_text = "?"
 
