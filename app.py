@@ -32,11 +32,12 @@ speed_history = {}
 last_speed_update = {}
 display_speeds = {}
 trajectories = {}
+kalman_states = {} 
+kalman_covs = {}   
 
 def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
     import time
     import numpy as np
-    import cv2
 
     fh = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
@@ -61,130 +62,90 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
     if results.boxes is None:
         return frame
 
-    now = time.time()
+    dt = 1.0 / max(fps, 1e-5)
+
+    # =========================
+    # KALMAN MATRICES
+    # =========================
+    F = np.array([
+        [1, dt],
+        [0, 1]
+    ], dtype=np.float32)
+
+    H = np.array([[1, 0]], dtype=np.float32)
+
+    Q = np.array([
+        [1e-3, 0],
+        [0, 1e-2]
+    ], dtype=np.float32)
+
+    R = np.array([[0.05]], dtype=np.float32)
 
     for box in results.boxes:
         if int(box.cls[0]) != 0:
             continue
 
-        track_id = int(box.id[0]) if box.id is not None else -1
-
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-
-        # =========================
-        # FOOT POINT STABILIZATION
-        # =========================
-        foot_x = (x1 + x2) // 2
-        raw_foot_y = y2
-
+        track_id = int(box.id[0]) if box.id is not None else -1
         if track_id == -1:
             continue
 
-        if track_id not in foot_history:
-            foot_history[track_id] = []
-
-        foot_history[track_id].append(raw_foot_y)
-        if len(foot_history[track_id]) > 10:
-            foot_history[track_id].pop(0)
-
-        hist = foot_history[track_id]
-
-        median_y = np.median(hist)
-        ema_y = hist[-1] if len(hist) == 1 else (0.7 * hist[-1] + 0.3 * median_y)
-
-        foot_y = int(ema_y)
+        foot_x = (x1 + x2) // 2
+        raw_foot_y = y2
 
         # =========================
-        # DISTANCE
+        # distance measurement
         # =========================
-        if foot_y > yh_s:
-            distance = fh_s / (foot_y - yh_s)
-            dist_text = f"{distance:.1f}m"
+        if raw_foot_y > yh_s:
+            z = fh_s / (raw_foot_y - yh_s)
         else:
-            distance = None
-            dist_text = "?"
+            z = None
 
         # =========================
-        # SPEED ESTIMATION
+        # INIT KALMAN
         # =========================
-        speed_text = ""
+        if track_id not in kalman_states:
+            kalman_states[track_id] = np.array([z if z is not None else 0.0, 0.0], dtype=np.float32)
+            kalman_covs[track_id] = np.eye(2, dtype=np.float32)
 
-        if distance is not None:
+        if z is None:
+            continue
 
-            if track_id not in prev_distances:
-                prev_distances[track_id] = distance
-                speed_history[track_id] = 0.0
-                display_speeds[track_id] = 0.0
-                last_speed_update[track_id] = now
-
-            else:
-                prev_d = prev_distances[track_id]
-                dt = 1.0 / fps if fps > 0 else 0.04
-
-                delta = prev_d - distance
-
-                # ---- DEAD ZONE (noise removal) ----
-                if abs(delta) < 0.03:
-                    delta = 0.0
-
-                raw_speed = delta / dt if dt > 0 else 0.0
-
-                # ---- ACCELERATION LIMIT ----
-                prev_speed = speed_history.get(track_id, 0.0)
-                max_change = 2.5  # m/s per frame step
-
-                raw_speed = np.clip(
-                    raw_speed,
-                    prev_speed - max_change,
-                    prev_speed + max_change
-                )
-
-                # ---- EMA smoothing ----
-                alpha = 0.2
-                speed_history[track_id] = (
-                    raw_speed if track_id not in speed_history
-                    else alpha * raw_speed + (1 - alpha) * speed_history[track_id]
-                )
-
-                smooth_speed = speed_history[track_id]
-
-                # ---- 0.5 sec display update hold ----
-                if (
-                    track_id not in last_speed_update or
-                    now - last_speed_update[track_id] > 0.5
-                ):
-                    display_speeds[track_id] = smooth_speed
-                    last_speed_update[track_id] = now
-
-                speed = display_speeds[track_id]
-                speed_text = f"{speed * 3.6:+.1f} km/h"
-
-                prev_distances[track_id] = distance
+        x = kalman_states[track_id]
+        P = kalman_covs[track_id]
 
         # =========================
-        # TRAJECTORY
+        # PREDICT
         # =========================
-        if track_id not in trajectories:
-            trajectories[track_id] = []
-
-        trajectories[track_id].append((foot_x, foot_y, now))
-
-        if len(trajectories[track_id]) > 70:
-            trajectories[track_id] = trajectories[track_id][-50:]
+        x = F @ x
+        P = F @ P @ F.T + Q
 
         # =========================
-        # DRAWING
+        # UPDATE
+        # =========================
+        z_vec = np.array([z], dtype=np.float32)
+        y = z_vec - (H @ x)
+        S = H @ P @ H.T + R
+        K = P @ H.T @ np.linalg.inv(S)
+
+        x = x + (K @ y).flatten()
+        P = (np.eye(2) - K @ H) @ P
+
+        kalman_states[track_id] = x
+        kalman_covs[track_id] = P
+
+        distance = float(x[0])
+        speed = float(x[1])
+
+        # =========================
+        # DRAW
         # =========================
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        if track_id in trajectories:
-            pts = [(p[0], p[1]) for p in trajectories[track_id][-30:]]
-            for i in range(1, len(pts)):
-                cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
+        dist_text = f"{distance:.2f}m"
+        speed_text = f"{speed * 3.6:+.1f} km/h"
 
-        label = f"id {track_id} | {dist_text}"
-        if speed_text:
-            label += f" | v {speed_text}"
+        label = f"id {track_id} | {dist_text} | v {speed_text}"
 
         cv2.putText(
             frame,
@@ -195,7 +156,6 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
             (0, 0, 139),
             2
         )
-        print(label)
 
     return frame
 
