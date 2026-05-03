@@ -21,6 +21,10 @@ from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QImage, QPixmap, QPalette, QColor
 from ultralytics import YOLO
 
+from PyQt5.QtMultimedia import QSoundEffect
+from PyQt5.QtCore import QUrl
+import time
+
 BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
@@ -36,7 +40,7 @@ smooth_foot_x   = {}
 smooth_foot_y   = {}
 danger_levels   = {}
 
-TTC_CRITICAL  = 3.0   # секунды — критическая опасность
+TTC_CRITICAL  = 2.0   # секунды — критическая опасность
 TTC_WARNING   = 6.0   # секунды — предупреждение  
 DIST_MIN      = 1.0   # метр — минимальная безопасная дистанция
 
@@ -229,43 +233,39 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
             2
         )
 
-        # ── глобальное предупреждение ─────────────────────────────────────
-        h, w = frame.shape[:2]
+    # ── глобальное предупреждение ─────────────────────────────────────
+    h, w = frame.shape[:2]
+    banner_h = 60
+    y1 = h - banner_h
+    y2 = h
+    if danger_levels:
+        max_danger = max(danger_levels.values())
+    else:
+        max_danger = 0
+    if max_danger == 2:
+        cv2.rectangle(frame, (0, y1), (w, y2), (0, 0, 200), -1)
+        cv2.putText(
+            frame,
+            "! DANGER: PEDESTRIAN ON PATH!",
+            (10, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (255, 255, 255),
+            2
+        )
+    elif max_danger == 1:
+        cv2.rectangle(frame, (0, y1), (w, y2), (0, 100, 200), -1)
+        cv2.putText(
+            frame,
+            "CAUTION: Pedestrian approaching",
+            (10, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (255, 255, 255),
+            2
+        )
 
-        banner_h = 60
-        y1 = h - banner_h
-        y2 = h
-
-        if danger_levels:
-            max_danger = max(danger_levels.values())
-        else:
-            max_danger = 0
-
-        if max_danger == 2:
-            cv2.rectangle(frame, (0, y1), (w, y2), (0, 0, 200), -1)
-            cv2.putText(
-                frame,
-                "! DANGER: PEDESTRIAN ON PATH!",
-                (10, h - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),
-                2
-            )
-
-        elif max_danger == 1:
-            cv2.rectangle(frame, (0, y1), (w, y2), (0, 100, 200), -1)
-            cv2.putText(
-                frame,
-                "CAUTION: Pedestrian approaching",
-                (10, h - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (255, 255, 255),
-                2
-            )
-
-    return frame
+    return frame, max_danger
 
 class VideoWorker(QThread):
     progress_changed = pyqtSignal(int)
@@ -279,53 +279,54 @@ class VideoWorker(QThread):
         self.model       = model
         self.calib_data  = calib_data
 
-def run(self):
-    cap = cv2.VideoCapture(self.input_path)
-    if not cap.isOpened():
-        self.error.emit("Не удалось открыть видеофайл.")
-        return
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps          = cap.get(cv2.CAP_PROP_FPS)
-
-    if not fps or fps <= 1:
-        fps = 25.0  
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out    = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
-
-    processed = 0
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        processed_frame = process_frame(
-            frame,
-            self.model,
-            self.calib_data,
-            fps
-        )
-
-        out.write(processed_frame)
-
-        processed += 1
-
-        if total_frames > 0:
-            progress = int(processed / total_frames * 100)
-            self.progress_changed.emit(progress)
-
-    cap.release()
-    out.release()
-
-    self.finished.emit(self.output_path)
+    def run(self):
+        cap = cv2.VideoCapture(self.input_path)
+        if not cap.isOpened():
+            self.error.emit("Не удалось открыть видеофайл.")
+            return
+    
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps          = cap.get(cv2.CAP_PROP_FPS)
+    
+        if not fps or fps <= 1:
+            fps = 25.0  
+    
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out    = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
+    
+        processed = 0
+    
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            processed_frame = process_frame(
+                frame,
+                self.model,
+                self.calib_data,
+                fps
+            )
+    
+            out.write(processed_frame)
+    
+            processed += 1
+    
+            if total_frames > 0:
+                progress = int(processed / total_frames * 100)
+                self.progress_changed.emit(progress)
+    
+        cap.release()
+        out.release()
+    
+        self.finished.emit(self.output_path)
 
 
 class CameraWorker(QThread):
-    frame_ready = pyqtSignal(np.ndarray)
+    #frame_ready = pyqtSignal(np.ndarray)
+    frame_ready = pyqtSignal(object)
 
     def __init__(self, camera_index: int, model, calib_data: dict):
         super().__init__()
@@ -348,13 +349,13 @@ class CameraWorker(QThread):
         while self._running:
             ret, frame = cap.read()
             if ret:
-                processed = process_frame(
+                processed, danger  = process_frame(
                     frame,
                     self.model,
                     self.calib_data,
                     fps
                 )
-                self.frame_ready.emit(processed)
+                self.frame_ready.emit((processed, danger))
 
         cap.release()
 
@@ -372,6 +373,22 @@ class MainWindow(QMainWindow):
         self.model        = None
         self.cam_thread   = None
         self.video_thread = None
+
+        self.current_danger_level = 0
+        self.sound_interval_warning = 0.5 
+        self.sound_interval_danger = 0.1
+        self.last_sound_time = 0
+
+        self.sound_warning = QSoundEffect()
+        self.sound_warning.setSource(QUrl.fromLocalFile("warning.wav"))
+        self.sound_warning.setVolume(0.5)
+
+        self.sound_danger = QSoundEffect()
+        self.sound_danger.setSource(QUrl.fromLocalFile("danger.wav"))
+        self.sound_danger.setVolume(0.7)
+
+        self.last_danger_time = 0
+        self.last_warning_time = 0
 
         if not self._load_resources():
             sys.exit()
@@ -638,7 +655,7 @@ class MainWindow(QMainWindow):
     def _detect_cameras(self):
         self.combo_cam.clear()
         for i in range(5):
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
             if cap.isOpened():
                 self.combo_cam.addItem(f"Камера {i}", i)
                 cap.release()
@@ -663,16 +680,38 @@ class MainWindow(QMainWindow):
             self.btn_toggle.setText("⏹  Остановить")
             self.btn_toggle.setStyleSheet(self._btn("#c0392b"))
 
-    def _update_feed(self, frame: np.ndarray):
+    def _update_feed(self, data):
+        frame, danger = data
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+
         self.lbl_feed.setPixmap(
             QPixmap.fromImage(qimg).scaled(
                 self.lbl_feed.width(), self.lbl_feed.height(),
                 Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
         )
+
+        self.current_danger_level = max(self.current_danger_level, danger)
+
+        now = time.time()
+
+        if self.current_danger_level == 2:
+            if now - self.last_sound_time > self.sound_interval_danger:
+                if self.sound_danger.isLoaded():
+                    self.sound_danger.play()
+                self.last_sound_time = now
+
+        elif self.current_danger_level == 1:
+            if now - self.last_sound_time > self.sound_interval_warning:
+                if self.sound_warning.isLoaded():
+                    self.sound_warning.play()
+                self.last_sound_time = now
+        
+        if danger == 0:
+            self.current_danger_level = 0
 
     def _stop_cam_and_back(self):
         if self.cam_thread and self.cam_thread.isRunning():
@@ -696,7 +735,7 @@ class MainWindow(QMainWindow):
             f"  font-weight: bold; padding: 6px 14px;"
             f"}}"
             f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
-            f"QPushButton:hover:enabled {{ background-color: {color}dd; }}"
+            f"QPushButton:hover:enabled {{ background-color: {color}; opacity: 0.9;}}"
         )
 
 if __name__ == "__main__":
