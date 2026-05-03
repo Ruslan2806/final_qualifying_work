@@ -55,8 +55,12 @@ class CameraPreview(QDialog):
         ret, frame = self.cap.read()
         if not ret:
             return
-        self.current_frame = frame
-        rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self.current_frame = frame.copy()  
+        display = frame.copy()
+        h, w = display.shape[:2]
+        cx = w // 2
+        cv2.line(display, (cx, 0), (cx, h), (0, 255, 0), 2)
+        rgb  = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         self.lbl_feed.setPixmap(
