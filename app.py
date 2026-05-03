@@ -32,6 +32,8 @@ speed_state     = {}
 trajectories    = {}
 kalman_states   = {}
 kalman_covs     = {}
+smooth_foot_x   = {}
+smooth_foot_y   = {}
 
 def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
     fh        = calib_data["fh"]
@@ -58,8 +60,8 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
 
     dt       = 1.0 / max(fps, 1e-5)
     alpha    = 0.2        # EMA коэффициент для скорости
-    sigma_a  = 0.5        # предполагаемое ускорение (м/с²)
-    deadband = 0.3       # мертвая зона измерений (3 см)
+    sigma_a  = 0.5        # предполагаемое ускорение (м/с^2)
+    deadband = 0.3       # мертвая зона измерений
 
     # ── Kalman матрицы ────────────────────────────────────────────────────────
     F = np.array([
@@ -121,7 +123,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
 
         # ── Update ────────────────────────────────────────────────────────────
         z_vec = np.array([z], dtype=np.float32)
-        inn   = z_vec - (H @ x)           # innovation
+        inn   = z_vec - (H @ x)           
         S     = H @ P @ H.T + R
         K     = P @ H.T @ np.linalg.inv(S)
         x     = x + (K @ inn).flatten()
@@ -132,7 +134,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
 
         distance = float(x[0])
 
-        # ── Скорость: Δdistance → EMA, не из x[1] ────────────────────────────
+        # ── Скорость: delta distance → EMA, не из x[1] ────────────────────────────
         raw_speed = (distance - prev_distances[track_id]) * fps
         prev_distances[track_id] = distance
 
@@ -143,11 +145,29 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         if abs(speed) < 0.3:
             speed = 0.0
             
-        # ── Траектория ────────────────────────────────────────────────────────
+        # ── Сглаживание координат точки для траектории ────────────────────────
+        alpha_pos = 0.1  # меньше = плавнее, больше = точнее
+
+        if track_id not in smooth_foot_x:
+            smooth_foot_x[track_id] = float(foot_x)
+            smooth_foot_y[track_id] = float(raw_foot_y)
+        else:
+            smooth_foot_x[track_id] = (
+                alpha_pos * foot_x + (1 - alpha_pos) * smooth_foot_x[track_id]
+            )
+            smooth_foot_y[track_id] = (
+                alpha_pos * raw_foot_y + (1 - alpha_pos) * smooth_foot_y[track_id]
+            )
+
+        sx = int(smooth_foot_x[track_id])
+        sy = int(smooth_foot_y[track_id])
+
+        # ── Траектория по сглаженным координатам ──────────────────────────────
         if track_id not in trajectories:
             trajectories[track_id] = []
-        trajectories[track_id].append((foot_x, raw_foot_y))
-        if len(trajectories[track_id]) > 60:          # последние 60 точек
+
+        trajectories[track_id].append((sx, sy))
+        if len(trajectories[track_id]) > 60:
             trajectories[track_id].pop(0)
 
         pts = trajectories[track_id]
