@@ -25,6 +25,10 @@ from PyQt5.QtMultimedia import QSoundEffect
 from PyQt5.QtCore import QUrl
 import time
 
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+import cv2
+
 BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
@@ -43,6 +47,16 @@ danger_levels   = {}
 TTC_CRITICAL  = 2.0   # секунды — критическая опасность
 TTC_WARNING   = 6.0   # секунды — предупреждение  
 DIST_MIN      = 1.0   # метр — минимальная безопасная дистанция
+
+def put_russian_text(frame, text, pos, color=(255,255,255)):
+    img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil)
+
+    font = ImageFont.truetype("font.ttf", 32)
+
+    draw.text(pos, text, font=font, fill=color)
+
+    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
 def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
     import numpy as np
@@ -242,29 +256,26 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         max_danger = max(danger_levels.values())
     else:
         max_danger = 0
+    
     if max_danger == 2:
         cv2.rectangle(frame, (0, y1), (w, y2), (0, 0, 200), -1)
-        cv2.putText(
+
+        frame = put_russian_text(
             frame,
-            "! DANGER: PEDESTRIAN ON PATH!",
-            (10, h - 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (255, 255, 255),
-            2
-        )
-    elif max_danger == 1:
-        cv2.rectangle(frame, (0, y1), (w, y2), (0, 100, 200), -1)
-        cv2.putText(
-            frame,
-            "CAUTION: Pedestrian approaching",
-            (10, h - 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (255, 255, 255),
-            2
+            "⚠ ОПАСНОСТЬ: ПЕШЕХОД НА ПУТИ!",
+            (10, h - 45),
+            color=(255, 255, 255)
         )
 
+    elif max_danger == 1:
+        cv2.rectangle(frame, (0, y1), (w, y2), (0, 100, 200), -1)
+
+        frame = put_russian_text(
+            frame,
+            "ВНИМАНИЕ: Пешеход приближается",
+            (10, h - 45),
+            color=(255, 255, 255)
+        )
     return frame, max_danger
 
 class VideoWorker(QThread):
