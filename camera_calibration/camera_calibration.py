@@ -26,8 +26,9 @@ class CameraPreview(QDialog):
     def __init__(self, camera_index: int, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Предпросмотр камеры")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setFixedSize(900, 700)
-
+        
         self.current_frame = None
 
         self.cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)

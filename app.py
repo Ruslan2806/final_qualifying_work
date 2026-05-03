@@ -16,7 +16,9 @@ import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QFileDialog,
-                             QComboBox, QStackedWidget, QMessageBox, QProgressBar)
+                             QComboBox, QStackedWidget, QMessageBox, QProgressBar, 
+                             QDialog, QFormLayout, QDoubleSpinBox, QCheckBox)
+
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QImage, QPixmap, QPalette, QColor
 from ultralytics import YOLO
@@ -32,7 +34,23 @@ import cv2
 BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
+SETTINGS_PATH = BASE_PATH / "settings.json"
 
+def load_settings():
+    if SETTINGS_PATH.exists():
+        with open(SETTINGS_PATH, "r") as f:
+            return json.load(f)
+    else:
+        return {
+            "TTC_CRITICAL": 2.0,
+            "TTC_WARNING": 6.0,
+            "DIST_MIN": 1.0,
+            "sound_enabled": True
+        }
+
+def save_settings(settings):
+    with open(SETTINGS_PATH, "w") as f:
+        json.dump(settings, f, indent=4)
 
 
 # ── Глобальные состояния ──────────────────────────────────────────────────────
@@ -48,9 +66,9 @@ track_last_seen = {}
 _frame_counter  = 0
 
 MAX_TRACK_AGE   = 90   
-TTC_CRITICAL = 2.0
-TTC_WARNING  = 5.0
-DIST_MIN     = 1.0
+#TTC_CRITICAL = 2.0
+#TTC_WARNING  = 5.0
+#DIST_MIN     = 1.0
 
 _kalman_H = np.array([[1, 0]], dtype=np.float32)
 _kalman_R = np.array([[0.05]], dtype=np.float32)
@@ -83,7 +101,11 @@ def put_russian_text(frame, text, pos, color=(255,255,255)):
 
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float):
+def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float, settings):
+    TTC_CRITICAL = settings["TTC_CRITICAL"]
+    TTC_WARNING  = settings["TTC_WARNING"]
+    DIST_MIN     = settings["DIST_MIN"]
+
     fh        = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
 
@@ -234,17 +256,79 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float):
 
     return frame, max_danger
 
+class SettingsDialog(QDialog):
+    def __init__(self, settings):
+        super().__init__()
+        self.setWindowTitle("Настройки")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        self.settings = settings
+
+        layout = QFormLayout()
+
+        self.ttc_critical = QDoubleSpinBox()
+        self.ttc_critical.setValue(settings["TTC_CRITICAL"])
+
+        self.ttc_warning = QDoubleSpinBox()
+        self.ttc_warning.setValue(settings["TTC_WARNING"])
+
+        self.dist_min = QDoubleSpinBox()
+        self.dist_min.setValue(settings["DIST_MIN"])
+
+        self.sound_checkbox = QCheckBox("Включить звук")
+        self.sound_checkbox.setChecked(settings["sound_enabled"])
+
+        layout.addRow("TTC критический:", self.ttc_critical)
+        layout.addRow("TTC предупреждение:", self.ttc_warning)
+        layout.addRow("Мин. дистанция:", self.dist_min)
+        layout.addRow(self.sound_checkbox)
+
+        btn_save = QPushButton("Сохранить")
+        btn_save.setFixedSize(120, 60)
+        btn_save.setStyleSheet(self._btn("#555"))
+        btn_save.clicked.connect(self.save)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_save)
+        btn_layout.addStretch()
+        
+        layout.addRow(btn_layout)
+        self.setLayout(layout)
+
+    def save(self):
+        self.settings["TTC_CRITICAL"] = self.ttc_critical.value()
+        self.settings["TTC_WARNING"]  = self.ttc_warning.value()
+        self.settings["DIST_MIN"]     = self.dist_min.value()
+        self.settings["sound_enabled"] = self.sound_checkbox.isChecked()
+
+        save_settings(self.settings)
+        self.accept()
+    
+    @staticmethod
+    def _btn(color: str) -> str:
+        return (
+            f"QPushButton {{"
+            f"  background-color: {color}; color: white;"
+            f"  border-radius: 6px; font-size: 14px;"
+            f"  font-weight: bold; padding: 6px 14px;"
+            f"}}"
+            f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
+            f"QPushButton:hover:enabled {{ background-color: {color}; opacity: 0.9;}}"
+        )
+
 class VideoWorker(QThread):
     progress_changed = pyqtSignal(int)
     finished         = pyqtSignal(str)
     error            = pyqtSignal(str)
 
-    def __init__(self, input_path: str, output_path: str, model, calib_data: dict):
+    def __init__(self, input_path: str, output_path: str, model, calib_data: dict, settings):
         super().__init__()
         self.input_path  = input_path
         self.output_path = output_path
         self.model       = model
-        self.calib_data  = calib_data
+        self.calib_data  = calib_data   
+        self.settings    = settings
 
     def run(self):
         cap = cv2.VideoCapture(self.input_path)
@@ -274,7 +358,8 @@ class VideoWorker(QThread):
                 frame,
                 self.model,
                 self.calib_data,
-                fps
+                fps,
+                self.settings
             )
     
             out.write(processed_frame)
@@ -295,11 +380,12 @@ class CameraWorker(QThread):
     #frame_ready = pyqtSignal(np.ndarray)
     frame_ready = pyqtSignal(object)
 
-    def __init__(self, camera_index: int, model, calib_data: dict):
+    def __init__(self, camera_index: int, model, calib_data: dict, settings):
         super().__init__()
         self.camera_index = camera_index
         self.model        = model
         self.calib_data   = calib_data
+        self.settings = settings
         self._running     = False
 
     def run(self):
@@ -320,7 +406,8 @@ class CameraWorker(QThread):
                     frame,
                     self.model,
                     self.calib_data,
-                    fps
+                    fps,
+                    self.settings
                 )
                 self.frame_ready.emit((processed, danger))
 
@@ -335,7 +422,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Система детекции пешеходов")
         self.setGeometry(100, 100, 860, 640)
-
+        self.settings = load_settings()
         self.calib_data   = None
         self.model        = None
         self.cam_thread   = None
@@ -435,14 +522,20 @@ class MainWindow(QMainWindow):
         btn_calib.clicked.connect(self._open_calibration)
 
         btn_reload = QPushButton("🔄  Обновить калибровку")
-        btn_reload.setFixedSize(320, 40)
-        btn_reload.setStyleSheet(self._btn("#555"))
+        btn_reload.setFixedSize(320, 60)
+        btn_reload.setStyleSheet(self._btn("#283f67"))
         btn_reload.clicked.connect(self._reload_calibration)
+
+        btn_settings = QPushButton("⚙️ Настройки")
+        btn_settings.setFixedSize(320, 60)
+        btn_settings.setStyleSheet(self._btn("#671b68"))
+        btn_settings.clicked.connect(self._open_settings)
 
         lay.addWidget(btn_video,  alignment=Qt.AlignCenter)
         lay.addWidget(btn_cam,    alignment=Qt.AlignCenter)
         lay.addWidget(btn_calib,  alignment=Qt.AlignCenter)
         lay.addWidget(btn_reload, alignment=Qt.AlignCenter)
+        lay.addWidget(btn_settings, alignment=Qt.AlignCenter)
 
         self.stack.addWidget(w)
 
@@ -571,6 +664,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить калибровку:\n{e}")
 
+    def _open_settings(self):
+        dialog = SettingsDialog(self.settings)
+        if dialog.exec_():
+            self.settings = load_settings()  
+
     def _select_input(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Выбрать видео", "", "Видео (*.mp4 *.avi *.mov)"
@@ -602,7 +700,7 @@ class MainWindow(QMainWindow):
         self.btn_process.setText("Обработка…")
         self.progress.setValue(0)
 
-        self.video_thread = VideoWorker(in_p, out_p, self.model, self.calib_data)
+        self.video_thread = VideoWorker(in_p, out_p, self.model, self.calib_data, self.settings.copy())
         self.video_thread.progress_changed.connect(self.progress.setValue)
         self.video_thread.finished.connect(self._on_video_done)
         self.video_thread.error.connect(self._on_video_error)
@@ -641,13 +739,13 @@ class MainWindow(QMainWindow):
             if idx == -1:
                 QMessageBox.warning(self, "Предупреждение", "Камеры недоступны.")
                 return
-            self.cam_thread = CameraWorker(idx, self.model, self.calib_data)
+            self.cam_thread = CameraWorker(idx, self.model, self.calib_data, self.settings.copy())
             self.cam_thread.frame_ready.connect(self._update_feed)
             self.cam_thread.start()
             self.btn_toggle.setText("⏹  Остановить")
             self.btn_toggle.setStyleSheet(self._btn("#c0392b"))
 
-    def _update_feed(self, data):
+    def _update_feed(self, data): 
         frame, danger = data
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -662,20 +760,20 @@ class MainWindow(QMainWindow):
         )
 
         self.current_danger_level = max(self.current_danger_level, danger)
-
-        now = time.time()
-
-        if self.current_danger_level == 2:
-            if now - self.last_sound_time > self.sound_interval_danger:
-                if self.sound_danger.isLoaded():
-                    self.sound_danger.play()
-                self.last_sound_time = now
-
-        elif self.current_danger_level == 1:
-            if now - self.last_sound_time > self.sound_interval_warning:
-                if self.sound_warning.isLoaded():
-                    self.sound_warning.play()
-                self.last_sound_time = now
+        if self.settings["sound_enabled"]:
+            now = time.time()
+    
+            if self.current_danger_level == 2:
+                if now - self.last_sound_time > self.sound_interval_danger:
+                    if self.sound_danger.isLoaded():
+                        self.sound_danger.play()
+                    self.last_sound_time = now
+    
+            elif self.current_danger_level == 1:
+                if now - self.last_sound_time > self.sound_interval_warning:
+                    if self.sound_warning.isLoaded():
+                        self.sound_warning.play()
+                    self.last_sound_time = now
         
         if danger == 0:
             self.current_danger_level = 0
