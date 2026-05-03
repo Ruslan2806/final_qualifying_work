@@ -252,14 +252,14 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
             label += f"  TTC:{ttc:.1f}s"
 
         cv2.putText(
-                   frame,
-                   label,
-                   (x1, max(y1 - 10, 15)),
-                   cv2.FONT_HERSHEY_SIMPLEX,
-                   0.55,
-                   (0, 0, 0),   
-                   2           
-               )
+           frame,
+           label,
+           (x1, max(y1 - 10, 15)),
+           cv2.FONT_HERSHEY_SIMPLEX,
+           0.55,
+           (0, 0, 0),   
+           2           
+        )
 
         cv2.putText(
             frame,
