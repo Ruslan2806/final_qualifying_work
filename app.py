@@ -521,20 +521,14 @@ class MainWindow(QMainWindow):
         btn_calib.setStyleSheet(self._btn("#8e44ad"))
         btn_calib.clicked.connect(self._open_calibration)
 
-        btn_reload = QPushButton("🔄  Обновить калибровку")
-        btn_reload.setFixedSize(320, 60)
-        btn_reload.setStyleSheet(self._btn("#283f67"))
-        btn_reload.clicked.connect(self._reload_calibration)
-
         btn_settings = QPushButton("⚙️ Настройки")
         btn_settings.setFixedSize(320, 60)
-        btn_settings.setStyleSheet(self._btn("#671b68"))
+        btn_settings.setStyleSheet(self._btn("#283f67"))
         btn_settings.clicked.connect(self._open_settings)
 
         lay.addWidget(btn_video,  alignment=Qt.AlignCenter)
         lay.addWidget(btn_cam,    alignment=Qt.AlignCenter)
         lay.addWidget(btn_calib,  alignment=Qt.AlignCenter)
-        lay.addWidget(btn_reload, alignment=Qt.AlignCenter)
         lay.addWidget(btn_settings, alignment=Qt.AlignCenter)
 
         self.stack.addWidget(w)
@@ -648,21 +642,6 @@ class MainWindow(QMainWindow):
             [sys.executable, str(calib_script)],
             cwd=str(calib_script.parent)
         )
-
-    def _reload_calibration(self):
-        if not CALIBRATION_PATH.exists():
-            QMessageBox.warning(
-                self, "Предупреждение",
-                "Файл calibration.json не найден.\nСначала выполните калибровку."
-            )
-            return
-        try:
-            with open(CALIBRATION_PATH, "r") as f:
-                self.calib_data = json.load(f)
-            self._update_calib_status_label()
-            QMessageBox.information(self, "Готово", "Калибровка успешно обновлена.")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить калибровку:\n{e}")
 
     def _open_settings(self):
         dialog = SettingsDialog(self.settings)
