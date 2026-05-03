@@ -34,16 +34,33 @@ kalman_states   = {}
 kalman_covs     = {}
 smooth_foot_x   = {}
 smooth_foot_y   = {}
+danger_levels   = {}
+
+TTC_CRITICAL  = 3.0   # секунды — критическая опасность
+TTC_WARNING   = 6.0   # секунды — предупреждение  
+DIST_MIN      = 1.0   # метр — минимальная безопасная дистанция
 
 def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
+    import numpy as np
+    import cv2
+
+    global kalman_states, kalman_covs
+    global prev_distances, speed_state
+    global trajectories, smooth_foot_x, smooth_foot_y
+    global danger_levels
+
+    # очищаем уровни опасности на каждый кадр
+    danger_levels.clear()
+
     fh        = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
 
     frame_h = frame.shape[0]
     calib_h = calib_data.get("image_height", frame_h)
     scale   = frame_h / calib_h if calib_h > 0 else 1.0
-    fh_s    = fh * scale
-    yh_s    = y_horizon * scale
+
+    fh_s = fh * scale
+    yh_s = y_horizon * scale
 
     results = model.track(
         frame,
@@ -59,19 +76,16 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         return frame
 
     dt       = 1.0 / max(fps, 1e-5)
-    alpha    = 0.2        # EMA коэффициент для скорости
-    sigma_a  = 0.5        # предполагаемое ускорение (м/с^2)
-    deadband = 0.3       # мертвая зона измерений
+    alpha    = 0.2
+    sigma_a  = 0.5
+    deadband = 0.03
 
-    # ── Kalman матрицы ────────────────────────────────────────────────────────
-    F = np.array([
-        [1, dt],
-        [0,  1]
-    ], dtype=np.float32)
+    # ── Kalman ─────────────────────────────────────────────────────────
+    F = np.array([[1, dt],
+                  [0, 1]], dtype=np.float32)
 
     H = np.array([[1, 0]], dtype=np.float32)
 
-    # Физически корректный process noise с моделью ускорения
     Q = np.array([
         [dt**4 / 4, dt**3 / 2],
         [dt**3 / 2, dt**2]
@@ -88,65 +102,78 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         if track_id == -1:
             continue
 
-        foot_x   = (x1 + x2) // 2
+        foot_x = (x1 + x2) // 2
         raw_foot_y = y2
 
-        # ── Измерение расстояния ──────────────────────────────────────────────
+        # ── distance ───────────────────────────────────────────────────
         if raw_foot_y > yh_s:
             z_raw = fh_s / (raw_foot_y - yh_s)
         else:
-            z_raw = None
-
-        if z_raw is None:
             continue
 
-        # ── Deadband: игнорируем микро-дрожание bbox ──────────────────────────
-        if track_id in kalman_states:
-            prev_z = float(kalman_states[track_id][0])
-            z = prev_z if abs(z_raw - prev_z) < deadband else z_raw
-        else:
-            z = z_raw
-
-        # ── Инициализация Kalman ──────────────────────────────────────────────
+        # ── init ───────────────────────────────────────────────────────
         if track_id not in kalman_states:
-            kalman_states[track_id] = np.array([z, 0.0], dtype=np.float32)
+            kalman_states[track_id] = np.array([z_raw, 0.0], dtype=np.float32)
             kalman_covs[track_id]   = np.eye(2, dtype=np.float32)
-            prev_distances[track_id] = z
+            prev_distances[track_id] = z_raw
             speed_state[track_id]    = 0.0
+
+        # ── deadband ───────────────────────────────────────────────────
+        prev_z = float(kalman_states[track_id][0])
+        z = prev_z if abs(z_raw - prev_z) < deadband else z_raw
 
         x = kalman_states[track_id]
         P = kalman_covs[track_id]
 
-        # ── Predict ───────────────────────────────────────────────────────────
+        # ── predict ────────────────────────────────────────────────────
         x = F @ x
         P = F @ P @ F.T + Q
 
-        # ── Update ────────────────────────────────────────────────────────────
+        # ── update ─────────────────────────────────────────────────────
         z_vec = np.array([z], dtype=np.float32)
-        inn   = z_vec - (H @ x)           
+        y_res = z_vec - (H @ x)
         S     = H @ P @ H.T + R
         K     = P @ H.T @ np.linalg.inv(S)
-        x     = x + (K @ inn).flatten()
-        P     = (np.eye(2) - K @ H) @ P
+
+        x = x + (K @ y_res).flatten()
+        P = (np.eye(2) - K @ H) @ P
 
         kalman_states[track_id] = x
         kalman_covs[track_id]   = P
 
         distance = float(x[0])
 
-        # ── Скорость: delta distance → EMA, не из x[1] ────────────────────────────
+        # ── speed (EMA от delta distance) ──────────────────────────────
         raw_speed = (distance - prev_distances[track_id]) * fps
         prev_distances[track_id] = distance
 
         speed_state[track_id] = (
-            alpha * raw_speed + (1 - alpha) * speed_state[track_id]
+            alpha * raw_speed +
+            (1 - alpha) * speed_state[track_id]
         )
-        speed = speed_state[track_id]   # м/с, знак: «-» = приближается
+
+        speed = speed_state[track_id]
+
         if abs(speed) < 0.3:
             speed = 0.0
-            
-        # ── Сглаживание координат точки для траектории ────────────────────────
-        alpha_pos = 0.1  # меньше = плавнее, больше = точнее
+
+        # ── TTC ────────────────────────────────────────────────────────
+        ttc    = None
+        danger = 0
+
+        if speed < -0.1 and distance > 0:
+            ttc = distance / abs(speed)
+            ttc = min(ttc, 10.0)  # ограничение
+
+            if distance < DIST_MIN or ttc < TTC_CRITICAL:
+                danger = 2
+            elif ttc < TTC_WARNING:
+                danger = 1
+
+        danger_levels[track_id] = danger
+
+        # ── сглаживание позиции ───────────────────────────────────────
+        alpha_pos = 0.1
 
         if track_id not in smooth_foot_x:
             smooth_foot_x[track_id] = float(foot_x)
@@ -162,7 +189,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         sx = int(smooth_foot_x[track_id])
         sy = int(smooth_foot_y[track_id])
 
-        # ── Траектория по сглаженным координатам ──────────────────────────────
+        # ── trajectory ─────────────────────────────────────────────────
         if track_id not in trajectories:
             trajectories[track_id] = []
 
@@ -174,24 +201,69 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         for i in range(1, len(pts)):
             cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
 
-        # ── Отрисовка ─────────────────────────────────────────────────────────
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        # ── draw ───────────────────────────────────────────────────────
+        box_colors = {
+            0: (0, 255, 0),
+            1: (0, 165, 255),
+            2: (0, 0, 255),
+        }
+        box_color = box_colors[danger]
 
-        # Цвет скорости: красный = приближается, зелёный = удаляется
-        speed_color = (0, 0, 255) if speed < -0.1 else (0, 200, 0)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
         dist_text  = f"{distance:.1f}m"
-        speed_kmh  = speed * 3.6
-        speed_text = f"{speed_kmh:+.1f}km/h"
+        speed_text = f"{speed * 3.6:+.1f}km/h"
 
         label = f"#{track_id}  {dist_text}  {speed_text}"
 
+        if ttc is not None and danger > 0:
+            label += f"  TTC:{ttc:.1f}s"
+
         cv2.putText(
-            frame, label,
+            frame,
+            label,
             (x1, max(y1 - 10, 15)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55, speed_color, 2
+            0.55,
+            box_color,
+            2
         )
+
+        # ── глобальное предупреждение ─────────────────────────────────────
+        h, w = frame.shape[:2]
+
+        banner_h = 60
+        y1 = h - banner_h
+        y2 = h
+
+        if danger_levels:
+            max_danger = max(danger_levels.values())
+        else:
+            max_danger = 0
+
+        if max_danger == 2:
+            cv2.rectangle(frame, (0, y1), (w, y2), (0, 0, 200), -1)
+            cv2.putText(
+                frame,
+                "! DANGER: PEDESTRIAN ON PATH!",
+                (10, h - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2
+            )
+
+        elif max_danger == 1:
+            cv2.rectangle(frame, (0, y1), (w, y2), (0, 100, 200), -1)
+            cv2.putText(
+                frame,
+                "CAUTION: Pedestrian approaching",
+                (10, h - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (255, 255, 255),
+                2
+            )
 
     return frame
 
