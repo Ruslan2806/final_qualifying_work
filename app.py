@@ -33,7 +33,9 @@ BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
 
-foot_history    = {}
+
+
+# ── Глобальные состояния ──────────────────────────────────────────────────────
 prev_distances  = {}
 speed_state     = {}
 kalman_states   = {}
@@ -41,10 +43,35 @@ kalman_covs     = {}
 smooth_foot_x   = {}
 smooth_foot_y   = {}
 danger_levels   = {}
+track_last_seen = {}   
 
-TTC_CRITICAL  = 2.0   # секунды — критическая опасность
-TTC_WARNING   = 5.0   # секунды — предупреждение  
-DIST_MIN      = 1.0   # метр — минимальная безопасная дистанция
+_frame_counter  = 0
+
+MAX_TRACK_AGE   = 90   
+TTC_CRITICAL = 2.0
+TTC_WARNING  = 5.0
+DIST_MIN     = 1.0
+
+_kalman_H = np.array([[1, 0]], dtype=np.float32)
+_kalman_R = np.array([[0.05]], dtype=np.float32)
+_kalman_I = np.eye(2, dtype=np.float32)
+
+
+def _cleanup_stale_tracks(active_ids: set) -> None:
+    global _frame_counter
+    _frame_counter += 1
+
+    for tid in active_ids:
+        track_last_seen[tid] = _frame_counter
+
+    stale = [
+        tid for tid, last in track_last_seen.items()
+        if _frame_counter - last > MAX_TRACK_AGE
+    ]
+    for tid in stale:
+        for d in (kalman_states, kalman_covs, prev_distances, speed_state,
+                  smooth_foot_x, smooth_foot_y, track_last_seen):
+            d.pop(tid, None)
 
 def put_russian_text(frame, text, pos, color=(255,255,255)):
     img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -56,27 +83,15 @@ def put_russian_text(frame, text, pos, color=(255,255,255)):
 
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.ndarray:
-    import numpy as np
-    import cv2
-
-    global kalman_states, kalman_covs
-    global prev_distances, speed_state
-    global smooth_foot_x, smooth_foot_y
-    global danger_levels
-
-    # очищаем уровни опасности на каждый кадр
-    danger_levels.clear()
-
+def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float):
     fh        = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
 
     frame_h = frame.shape[0]
     calib_h = calib_data.get("image_height", frame_h)
     scale   = frame_h / calib_h if calib_h > 0 else 1.0
-
-    fh_s = fh * scale
-    yh_s = y_horizon * scale
+    fh_s    = fh * scale
+    yh_s    = y_horizon * scale
 
     results = model.track(
         frame,
@@ -88,26 +103,29 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         amp=False
     )[0]
 
-    if results.boxes is None:
-        return frame
+    danger_levels.clear()
 
-    dt       = 1.0 / max(fps, 1e-5)
-    alpha    = 0.2
-    sigma_a  = 0.5
-    deadband = 0.03
+    if results.boxes is None or len(results.boxes) == 0:
+        return frame, 0
 
-    # ── Kalman ─────────────────────────────────────────────────────────
-    F = np.array([[1, dt],
-                  [0, 1]], dtype=np.float32)
+    # Собираем активные ID и очищаем устаревшие треки
+    active_ids = set()
+    for box in results.boxes:
+        if box.id is not None and int(box.cls[0]) == 0:
+            active_ids.add(int(box.id[0]))
+    _cleanup_stale_tracks(active_ids)
 
-    H = np.array([[1, 0]], dtype=np.float32)
+    dt      = 1.0 / max(fps, 1e-5)
+    alpha   = 0.2
+    sigma_a = 0.5
+    alpha_pos = 0.1
 
+    # Kalman матрицы — пересчитываем только F и Q (зависят от dt)
+    F = np.array([[1, dt], [0, 1]], dtype=np.float32)
     Q = np.array([
         [dt**4 / 4, dt**3 / 2],
         [dt**3 / 2, dt**2]
     ], dtype=np.float32) * sigma_a**2
-
-    R = np.array([[0.05]], dtype=np.float32)
 
     for box in results.boxes:
         if int(box.cls[0]) != 0:
@@ -118,187 +136,102 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         if track_id == -1:
             continue
 
-        foot_x = (x1 + x2) // 2
+        foot_x     = (x1 + x2) // 2
         raw_foot_y = y2
 
-        # ── distance ───────────────────────────────────────────────────
-        if raw_foot_y > yh_s:
-            z_raw = fh_s / (raw_foot_y - yh_s)
-        else:
-            continue
-
-        near_bottom = raw_foot_y >= frame_h * 0.99
-        if near_bottom:
-            danger = 2
-            danger_levels[track_id] = danger
+        # Пешеход у нижнего края — критическая опасность без расчётов
+        if raw_foot_y >= frame_h * 0.99:
+            danger_levels[track_id] = 2
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            
             cv2.putText(frame, f"#{track_id}  <1m",
                         (x1, max(y1 - 10, 15)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
-            
             cv2.putText(frame, f"#{track_id}  <1m",
                         (x1, max(y1 - 10, 15)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1)
-            
             continue
 
-        # ── init ───────────────────────────────────────────────────────
+        if raw_foot_y <= yh_s:
+            continue
+        z_raw = fh_s / (raw_foot_y - yh_s)
+
+        # Инициализация трека
         if track_id not in kalman_states:
-            kalman_states[track_id] = np.array([z_raw, 0.0], dtype=np.float32)
-            kalman_covs[track_id]   = np.eye(2, dtype=np.float32)
+            kalman_states[track_id]  = np.array([z_raw, 0.0], dtype=np.float32)
+            kalman_covs[track_id]    = np.eye(2, dtype=np.float32)
             prev_distances[track_id] = z_raw
             speed_state[track_id]    = 0.0
 
-        # ── deadband ───────────────────────────────────────────────────
+        # Deadband
         prev_z = float(kalman_states[track_id][0])
-        z = prev_z if abs(z_raw - prev_z) < deadband else z_raw
+        z = prev_z if abs(z_raw - prev_z) < 0.03 else z_raw
 
-        x = kalman_states[track_id]
-        P = kalman_covs[track_id]
+        # Kalman predict
+        x = F @ kalman_states[track_id]
+        P = F @ kalman_covs[track_id] @ F.T + Q
 
-        # ── predict ────────────────────────────────────────────────────
-        x = F @ x
-        P = F @ P @ F.T + Q
+        inn = np.array([z], dtype=np.float32) - (_kalman_H @ x)
+        S   = _kalman_H @ P @ _kalman_H.T + _kalman_R
+        K   = P @ _kalman_H.T / float(S[0, 0])  
 
-        # ── update ─────────────────────────────────────────────────────
-        z_vec = np.array([z], dtype=np.float32)
-        y_res = z_vec - (H @ x)
-        S     = H @ P @ H.T + R
-        K     = P @ H.T @ np.linalg.inv(S)
+        kalman_states[track_id] = x + K.flatten() * float(inn[0])
+        kalman_covs[track_id]   = (_kalman_I - np.outer(K, _kalman_H)) @ P
 
-        x = x + (K @ y_res).flatten()
-        P = (np.eye(2) - K @ H) @ P
+        distance = float(kalman_states[track_id][0])
 
-        kalman_states[track_id] = x
-        kalman_covs[track_id]   = P
-
-        distance = float(x[0])
-
-        # ── speed (EMA от delta distance) ──────────────────────────────
+        # Скорость EMA
         raw_speed = (distance - prev_distances[track_id]) * fps
         prev_distances[track_id] = distance
+        speed_state[track_id]    = alpha * raw_speed + (1 - alpha) * speed_state[track_id]
+        speed = speed_state[track_id] if abs(speed_state[track_id]) >= 0.3 else 0.0
 
-        speed_state[track_id] = (
-            alpha * raw_speed +
-            (1 - alpha) * speed_state[track_id]
-        )
-
-        speed = speed_state[track_id]
-
-        if abs(speed) < 0.3:
-            speed = 0.0
-
-        # ── TTC ────────────────────────────────────────────────────────
+        # TTC
         ttc    = None
         danger = 0
-
         if speed < -0.1 and distance > 0:
-            ttc = distance / abs(speed)
-            ttc = min(ttc, 10.0)  # ограничение
-
+            ttc = min(distance / abs(speed), 10.0)
             if distance < DIST_MIN or ttc < TTC_CRITICAL:
                 danger = 2
             elif ttc < TTC_WARNING:
                 danger = 1
-
         danger_levels[track_id] = danger
 
-        # ── сглаживание позиции ───────────────────────────────────────
-        alpha_pos = 0.1
-
+        # Сглаживание позиции
         if track_id not in smooth_foot_x:
             smooth_foot_x[track_id] = float(foot_x)
             smooth_foot_y[track_id] = float(raw_foot_y)
         else:
-            smooth_foot_x[track_id] = (
-                alpha_pos * foot_x + (1 - alpha_pos) * smooth_foot_x[track_id]
-            )
-            smooth_foot_y[track_id] = (
-                alpha_pos * raw_foot_y + (1 - alpha_pos) * smooth_foot_y[track_id]
-            )
+            smooth_foot_x[track_id] = alpha_pos * foot_x     + (1 - alpha_pos) * smooth_foot_x[track_id]
+            smooth_foot_y[track_id] = alpha_pos * raw_foot_y + (1 - alpha_pos) * smooth_foot_y[track_id]
 
-        sx = int(smooth_foot_x[track_id])
-        sy = int(smooth_foot_y[track_id])
+        # Отрисовка
+        box_color = {0: (0, 255, 0), 1: (0, 165, 255), 2: (0, 0, 255)}[danger]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
-        # ── trajectory ─────────────────────────────────────────────────
-        #if track_id not in trajectories:
-        #    trajectories[track_id] = []
-
-        #trajectories[track_id].append((sx, sy))
-        #if len(trajectories[track_id]) > 60:
-        #    trajectories[track_id].pop(0)
-
-        #pts = trajectories[track_id]
-        #for i in range(1, len(pts)):
-        #    cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
-
-        # ── draw ───────────────────────────────────────────────────────
-        box_colors = {
-            0: (0, 255, 0),
-            1: (0, 165, 255),
-            2: (0, 0, 255),
-        }
-        box_color = box_colors[danger]
-
-        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 1)
-
-        dist_text  = f"{distance:.1f}m"
-        speed_text = f"{speed * 3.6:+.1f}km/h"
-
-        label = f"#{track_id}  {dist_text}  {speed_text}"
-
+        label = f"#{track_id}  {distance:.1f}m  {speed * 3.6:+.1f}km/h"
         if ttc is not None and danger > 0:
             label += f"  TTC:{ttc:.1f}s"
 
-        cv2.putText(
-           frame,
-           label,
-           (x1, max(y1 - 10, 15)),
-           cv2.FONT_HERSHEY_SIMPLEX,
-           0.55,
-           (0, 0, 0),   
-           2           
-        )
+        # Обводка текста
+        cv2.putText(frame, label, (x1, max(y1 - 10, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+        cv2.putText(frame, label, (x1, max(y1 - 10, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 1)
 
-        cv2.putText(
-            frame,
-            label,
-            (x1, max(y1 - 10, 15)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 0, 255),   
-            1            
-        )
-    
-
-    # ── глобальное предупреждение ─────────────────────────────────────
+    # Глобальное предупреждение
+    max_danger = max(danger_levels.values(), default=0)
     h, w = frame.shape[:2]
-    banner_h = 40
-    y1 = h - banner_h
-    y2 = h
-    if danger_levels:
-        max_danger = max(danger_levels.values())
-    else:
-        max_danger = 0
-    
-    if max_danger == 2:
-        cv2.rectangle(frame, (0, y1), (w, y2), (0, 0, 200), -1)
-        frame = put_russian_text(
-            frame,
-            "ОПАСНОСТЬ: ПЕШЕХОД НА ПУТИ!",
-            (10, h - 35),
-            color=(255, 255, 255)
-        )
+    y_banner = h - 40
 
+    if max_danger == 2:
+        cv2.rectangle(frame, (0, y_banner), (w, h), (0, 0, 200), -1)
+        frame = put_russian_text(frame, "ОПАСНОСТЬ: ПЕШЕХОД НА ПУТИ!",
+                                 (10, h - 35), color=(255, 255, 255))
     elif max_danger == 1:
-        cv2.rectangle(frame, (0, y1), (w, y2), (0, 100, 200), -1)
-        frame = put_russian_text(
-            frame,
-            "ВНИМАНИЕ: Пешеход приближается",
-            (10, h - 35),
-            color=(255, 255, 255)
-        )
+        cv2.rectangle(frame, (0, y_banner), (w, h), (0, 100, 200), -1)
+        frame = put_russian_text(frame, "ВНИМАНИЕ: Пешеход приближается",
+                                 (10, h - 35), color=(255, 255, 255))
+
     return frame, max_danger
 
 class VideoWorker(QThread):
