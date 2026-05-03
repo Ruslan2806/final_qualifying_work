@@ -32,12 +32,10 @@ import cv2
 BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
-# = BASE_PATH / "neural_networks" / "yolov8" / "weights" / "yolov8_best.pt"
 
 foot_history    = {}
 prev_distances  = {}
 speed_state     = {}
-trajectories    = {}
 kalman_states   = {}
 kalman_covs     = {}
 smooth_foot_x   = {}
@@ -45,14 +43,14 @@ smooth_foot_y   = {}
 danger_levels   = {}
 
 TTC_CRITICAL  = 2.0   # секунды — критическая опасность
-TTC_WARNING   = 6.0   # секунды — предупреждение  
+TTC_WARNING   = 5.0   # секунды — предупреждение  
 DIST_MIN      = 1.0   # метр — минимальная безопасная дистанция
 
 def put_russian_text(frame, text, pos, color=(255,255,255)):
     img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(img_pil)
 
-    font = ImageFont.truetype("font.ttf", 32)
+    font = ImageFont.truetype("font.ttf", 24)
 
     draw.text(pos, text, font=font, fill=color)
 
@@ -64,7 +62,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
 
     global kalman_states, kalman_covs
     global prev_distances, speed_state
-    global trajectories, smooth_foot_x, smooth_foot_y
+    global smooth_foot_x, smooth_foot_y
     global danger_levels
 
     # очищаем уровни опасности на каждый кадр
@@ -127,6 +125,22 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         if raw_foot_y > yh_s:
             z_raw = fh_s / (raw_foot_y - yh_s)
         else:
+            continue
+
+        near_bottom = raw_foot_y >= frame_h * 0.99
+        if near_bottom:
+            danger = 2
+            danger_levels[track_id] = danger
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            
+            cv2.putText(frame, f"#{track_id}  <1m",
+                        (x1, max(y1 - 10, 15)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+            
+            cv2.putText(frame, f"#{track_id}  <1m",
+                        (x1, max(y1 - 10, 15)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1)
+            
             continue
 
         # ── init ───────────────────────────────────────────────────────
@@ -208,16 +222,16 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         sy = int(smooth_foot_y[track_id])
 
         # ── trajectory ─────────────────────────────────────────────────
-        if track_id not in trajectories:
-            trajectories[track_id] = []
+        #if track_id not in trajectories:
+        #    trajectories[track_id] = []
 
-        trajectories[track_id].append((sx, sy))
-        if len(trajectories[track_id]) > 60:
-            trajectories[track_id].pop(0)
+        #trajectories[track_id].append((sx, sy))
+        #if len(trajectories[track_id]) > 60:
+        #    trajectories[track_id].pop(0)
 
-        pts = trajectories[track_id]
-        for i in range(1, len(pts)):
-            cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
+        #pts = trajectories[track_id]
+        #for i in range(1, len(pts)):
+        #    cv2.line(frame, pts[i - 1], pts[i], (0, 255, 255), 2)
 
         # ── draw ───────────────────────────────────────────────────────
         box_colors = {
@@ -227,7 +241,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
         }
         box_color = box_colors[danger]
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 1)
 
         dist_text  = f"{distance:.1f}m"
         speed_text = f"{speed * 3.6:+.1f}km/h"
@@ -238,18 +252,29 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
             label += f"  TTC:{ttc:.1f}s"
 
         cv2.putText(
+                   frame,
+                   label,
+                   (x1, max(y1 - 10, 15)),
+                   cv2.FONT_HERSHEY_SIMPLEX,
+                   0.55,
+                   (0, 0, 0),   
+                   2           
+               )
+
+        cv2.putText(
             frame,
             label,
             (x1, max(y1 - 10, 15)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
-            box_color,
-            2
+            (0, 0, 255),   
+            1            
         )
+    
 
     # ── глобальное предупреждение ─────────────────────────────────────
     h, w = frame.shape[:2]
-    banner_h = 60
+    banner_h = 40
     y1 = h - banner_h
     y2 = h
     if danger_levels:
@@ -259,21 +284,19 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float) -> np.
     
     if max_danger == 2:
         cv2.rectangle(frame, (0, y1), (w, y2), (0, 0, 200), -1)
-
         frame = put_russian_text(
             frame,
-            "⚠ ОПАСНОСТЬ: ПЕШЕХОД НА ПУТИ!",
-            (10, h - 45),
+            "ОПАСНОСТЬ: ПЕШЕХОД НА ПУТИ!",
+            (10, h - 35),
             color=(255, 255, 255)
         )
 
     elif max_danger == 1:
         cv2.rectangle(frame, (0, y1), (w, y2), (0, 100, 200), -1)
-
         frame = put_russian_text(
             frame,
             "ВНИМАНИЕ: Пешеход приближается",
-            (10, h - 45),
+            (10, h - 35),
             color=(255, 255, 255)
         )
     return frame, max_danger
