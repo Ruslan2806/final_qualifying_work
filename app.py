@@ -344,7 +344,7 @@ class VideoWorker(QThread):
         if not fps or fps <= 1:
             fps = 25.0  
     
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"avc1")
         out    = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
     
         processed = 0
@@ -354,14 +354,13 @@ class VideoWorker(QThread):
             if not ret:
                 break
             
-            processed_frame = process_frame(
+            processed_frame, _ = process_frame(
                 frame,
                 self.model,
                 self.calib_data,
                 fps,
                 self.settings
             )
-    
             out.write(processed_frame)
     
             processed += 1
