@@ -330,8 +330,8 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
     return frame, radar, max_danger
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings):
-        super().__init__()
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
         self.setWindowTitle("Настройки")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
