@@ -112,18 +112,16 @@ def create_radar_frame(pedestrians: dict) -> np.ndarray:
     radar     = np.full((RH, RW, 3), 18, dtype=np.uint8)
     cx        = RW // 2
     
-    icon_h, icon_w = 0, 0
-    if CAR_ICON is not None:
-        icon_h, icon_w = CAR_ICON.shape[:2]
-    else:
-        icon_h, icon_w = 40, 20
-
-    cy_bumper = RH - 40 
+    cy_bumper = RH - 60 
     
-    m_to_py   = (RH - 80) / MAX_RADAR_DIST  # Масштаб метров
-    m_to_px   = RW / 5.0                    # Масштаб ширины (8м обзор)
+    m_to_py   = (RH - 100) / MAX_RADAR_DIST  # Масштаб метров по вертикали
+    m_to_px   = RW / 3.0                     # Масштаб ширины (3 метра на всю ширину радара)
 
-    # 2. Отрисовка сетки расстояний 
+    # Рассчитываем точную ширину коридора
+    target_w = int(CAR_WIDTH_M * m_to_px)
+    car_half = target_w // 2
+
+    # Отрисовка сетки расстояний
     for d in range(1, int(MAX_RADAR_DIST) + 1):
         y_line = cy_bumper - int(d * m_to_py)
         if y_line < 10: continue
@@ -134,33 +132,41 @@ def create_radar_frame(pedestrians: dict) -> np.ndarray:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (120, 120, 120), 1)
 
     # Отрисовка коридора 
-    car_half = int((CAR_WIDTH_M / 2) * m_to_px)
     cv2.rectangle(radar, (cx - car_half, 10), (cx + car_half, cy_bumper), (0, 38, 0), -1)
     cv2.line(radar, (cx, 10), (cx, cy_bumper), (50, 50, 50), 1)
 
     # Значок автомобиля 
     if CAR_ICON is not None:
-        y1, y2 = cy_bumper, cy_bumper + icon_h
-        x1, x2 = cx - icon_w // 2, cx + icon_w // 2
+        h_orig, w_orig = CAR_ICON.shape[:2]
+        aspect_ratio = h_orig / w_orig
+        icon_w = target_w
+        icon_h = int(icon_w * aspect_ratio)
+        
+        temp_icon = cv2.resize(CAR_ICON, (icon_w, icon_h))
+
+        x1 = cx - icon_w // 2
+        x2 = x1 + icon_w
+        y1 = cy_bumper
+        y2 = y1 + icon_h
 
         if y2 <= RH and x1 >= 0 and x2 <= RW:
-            if CAR_ICON.shape[2] == 4:
-                alpha_s = CAR_ICON[:, :, 3] / 255.0
+            if temp_icon.shape[2] == 4: 
+                alpha_s = temp_icon[:, :, 3] / 255.0
                 alpha_l = 1.0 - alpha_s
                 for c in range(0, 3):
-                    radar[y1:y2, x1:x2, c] = (alpha_s * CAR_ICON[:, :, c] +
+                    radar[y1:y2, x1:x2, c] = (alpha_s * temp_icon[:, :, c] +
                                               alpha_l * radar[y1:y2, x1:x2, c])
             else:
-                radar[y1:y2, x1:x2] = CAR_ICON[:, :, :3]
+                radar[y1:y2, x1:x2] = temp_icon[:, :, :3]
     else:
-        cv2.rectangle(radar, (cx - 8, cy_bumper), (cx + 8, cy_bumper + 15), (160, 160, 160), -1)
+        cv2.rectangle(radar, (cx - car_half, cy_bumper), (cx + car_half, cy_bumper + 30), (160, 160, 160), -1)
 
     # Пешеходы
     for tid, (rx_m, rz_m, danger) in pedestrians.items():
         if rz_m <= 0 or rz_m > MAX_RADAR_DIST:
             continue
         px = cx + int(rx_m * m_to_px)
-        py = cy_bumper - int(rz_m * m_to_py) 
+        py = cy_bumper - int(rz_m * m_to_py)
         
         px = int(np.clip(px, 5, RW - 5))
         py = int(np.clip(py, 5, RH - 5))
@@ -169,11 +175,6 @@ def create_radar_frame(pedestrians: dict) -> np.ndarray:
         cv2.circle(radar, (px, py), 6, color, -1)
         cv2.putText(radar, f"#{tid}", (px + 8, py + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.32, (230, 230, 230), 1)
-
-    # Подписи
-    #cv2.putText(radar, "TOP VIEW", (cx - 24, RH - 6),
-    #            cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 100), 1)
-    #cv2.rectangle(radar, (0, 0), (RW - 1, RH - 1), (70, 70, 70), 1)
 
     return radar
 
@@ -682,9 +683,9 @@ class MainWindow(QMainWindow):
             0: ("background:#0a2a0a; border:2px solid #2ecc71; border-radius:10px;",
                 "color:#00e676; border:none;", "ПУТЬ СВОБОДЕН"),
             1: ("background:#2a1a00; border:2px solid #f39c12; border-radius:10px;",
-                "color:#f39c12; border:none;", "ВНИМАНИЕ:\nПЕШЕХОД НА ПУТИ"),
+                "color:#f39c12; border:none;", "ЭКСТРЕННОЕ ТОРМОЖЕНИЕ\nкритическая угроза столкновения"),
             2: ("background:#2a0000; border:3px solid #e74c3c; border-radius:10px;",
-                "color:#ff4444; border:none;", "ОПАСНОСТЬ:\nЭКСТРЕННОЕ ТОРМОЖЕНИЕ"),
+                "color:#ff4444; border:none;", "СНИЖЕНИЕ СКОРОСТИ\nпешеход на траектории движения"),
         }
         panel_style, text_style, text = styles[danger]
         self.warn_panel.setStyleSheet(panel_style)
