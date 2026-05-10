@@ -255,7 +255,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float, settin
 
         # Отрисовка
         box_color = {0: (0, 255, 0), 1: (0, 165, 255), 2: (0, 0, 255)}[danger]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 1)
         label = f"#{track_id} {distance:.1f}m {speed*3.6:+.1f}kmh"
         if ttc and danger > 0: label += f" TTC:{ttc:.1f}s"
         cv2.putText(frame, label, (x1, max(y1-10, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
@@ -266,10 +266,10 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float, settin
     max_danger = max(danger_levels.values(), default=0)
     if max_danger == 2:
         cv2.rectangle(frame, (0, frame_h-40), (frame_w, frame_h), (0,0,200), -1)
-        frame = put_russian_text(frame, "ОПАСНОСТЬ: ТОРМОЖЕНИЕ!", (10, frame_h-35))
+        frame = put_russian_text(frame, "ЭКСТРЕННОЕ ТОРМОЖЕНИЕ: Критическая угроза столкновения!", (10, frame_h-35))
     elif max_danger == 1:
         cv2.rectangle(frame, (0, frame_h-40), (frame_w, frame_h), (0,100,200), -1)
-        frame = put_russian_text(frame, "ВНИМАНИЕ: Пешеход у пути", (10, frame_h-35))
+        frame = put_russian_text(frame, "СНИЖЕНИЕ СКОРОСТИ: Пешеход на траектории движения!", (10, frame_h-35))
 
     return frame, max_danger
 
