@@ -66,14 +66,81 @@ track_last_seen = {}
 _frame_counter  = 0
 
 MAX_TRACK_AGE   = 90   
-#TTC_CRITICAL = 2.0
-#TTC_WARNING  = 5.0
-#DIST_MIN     = 1.0
+
+CAR_WIDTH_M = 0.5  # Ширина автомобиля в метрах
+MAX_RADAR_DIST = 5.0 # Максимальная дистанция на радаре
 
 _kalman_H = np.array([[1, 0]], dtype=np.float32)
 _kalman_R = np.array([[0.05]], dtype=np.float32)
 _kalman_I = np.eye(2, dtype=np.float32)
 
+def get_metric_coordinates(foot_x, distance, frame_w, fh_s, calib_data):
+    cam_h = calib_data.get("camera_height_m", 0.5)
+    focal_px = fh_s / cam_h
+    cx = frame_w / 2
+    # X = (смещение_px) * Z / f
+    real_x = (foot_x - cx) * distance / focal_px
+    return real_x, distance
+
+def draw_safe_corridor(frame: np.ndarray, calib_data: dict, fh_s: float, yh_s: float):
+    h, w = frame.shape[:2]
+    cam_h = calib_data.get("camera_height_m", 0.5)
+    focal_px = fh_s / cam_h
+    cx = w / 2
+
+    # Формируем трапецию коридора от 0.1 до 15 метров
+    pts = []
+    # 15м - дальняя граница, 0.1м - ближняя 
+    for z in [15.0, 0.1]: 
+        x_offset = (CAR_WIDTH_M / 2) * focal_px / z
+        y_px = (fh_s / z) + yh_s
+        pts.append([cx - x_offset, y_px]) 
+        pts.insert(0, [cx + x_offset, y_px]) 
+
+    pts = np.array(pts, np.int32)
+    overlay = frame.copy()
+    cv2.fillPoly(overlay, [pts], (80, 80, 80)) 
+    cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
+    cv2.polylines(frame, [pts], True, (180, 180, 180), 1)
+
+def draw_radar(frame: np.ndarray, pedestrians_metrics: dict, frame_w: int):
+    RW, RH = 180, 240 
+    MARGIN = 15
+    h, w = frame.shape[:2]
+    rx, ry = w - RW - MARGIN, MARGIN
+
+    # Фон радара
+    cv2.rectangle(frame, (rx, ry), (rx + RW, ry + RH), (20, 20, 20), -1)
+    cv2.rectangle(frame, (rx, ry), (rx + RW, ry + RH), (80, 80, 80), 1)
+
+    cx_r = rx + RW // 2
+    cy_r = ry + RH - 15 
+
+    # Сетка с шагом 1 метр
+    for d in range(1, int(MAX_RADAR_DIST) + 1):
+        y_m = cy_r - int((d / MAX_RADAR_DIST) * (RH - 40))
+        color = (60, 60, 60) if d % 2 != 0 else (90, 90, 90)
+        cv2.line(frame, (rx + 10, y_m), (rx + RW - 10, y_m), color, 1)
+        if d % 2 == 0:
+            cv2.putText(frame, f"{d}m", (rx + 2, y_m + 3), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1)
+
+    # Коридор автомобиля на радаре
+    meter_to_px = RW / 6.0 
+    car_half_w = int((CAR_WIDTH_M / 2) * meter_to_px)
+    cv2.rectangle(frame, (cx_r - car_half_w, ry + 5), (cx_r + car_half_w, cy_r), (0, 40, 0), -1)
+
+    # Пешеходы
+    for tid, (rx_m, rz_m, danger) in pedestrians_metrics.items():
+        if rz_m > MAX_RADAR_DIST or rz_m <= 0: continue
+        px = cx_r + int(rx_m * meter_to_px)
+        py = cy_r - int((rz_m / MAX_RADAR_DIST) * (RH - 40))
+        px = np.clip(px, rx + 5, rx + RW - 5)
+        py = np.clip(py, ry + 5, ry + RH - 5)
+        color = {0: (0, 255, 0), 1: (0, 165, 255), 2: (0, 0, 255)}[danger]
+        cv2.circle(frame, (px, py), 4, color, -1)
+        cv2.putText(frame, str(tid), (px + 5, py + 5), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
 
 def _cleanup_stale_tracks(active_ids: set) -> None:
     global _frame_counter
@@ -106,153 +173,103 @@ def process_frame(frame: np.ndarray, model, calib_data: dict, fps: float, settin
     TTC_WARNING  = settings["TTC_WARNING"]
     DIST_MIN     = settings["DIST_MIN"]
 
-    fh        = calib_data["fh"]
-    y_horizon = calib_data["y_horizon"]
-
-    frame_h = frame.shape[0]
+    fh, y_horizon = calib_data["fh"], calib_data["y_horizon"]
+    frame_h, frame_w = frame.shape[:2]
     calib_h = calib_data.get("image_height", frame_h)
     scale   = frame_h / calib_h if calib_h > 0 else 1.0
-    fh_s    = fh * scale
-    yh_s    = y_horizon * scale
+    fh_s, yh_s = fh * scale, y_horizon * scale
 
-    results = model.track(
-        frame,
-        conf=0.4,
-        verbose=False,
-        device=0,
-        tracker="bytetrack.yaml",
-        persist=True,
-        amp=False
-    )[0]
+    results = model.track(frame, conf=0.4, verbose=False, device=0, tracker="bytetrack.yaml", persist=True, amp=False)[0]
 
     danger_levels.clear()
+    active_pedestrians_metric = {} 
+
+    draw_safe_corridor(frame, calib_data, fh_s, yh_s)
 
     if results.boxes is None or len(results.boxes) == 0:
+        draw_radar(frame, {}, frame_w)
         return frame, 0
 
-    # Собираем активные ID и очищаем устаревшие треки
-    active_ids = set()
-    for box in results.boxes:
-        if box.id is not None and int(box.cls[0]) == 0:
-            active_ids.add(int(box.id[0]))
+    active_ids = {int(box.id[0]) for box in results.boxes if box.id is not None and int(box.cls[0]) == 0}
     _cleanup_stale_tracks(active_ids)
 
-    dt      = 1.0 / max(fps, 1e-5)
-    alpha   = 0.2
-    sigma_a = 0.5
-    alpha_pos = 0.1
-
-    # Kalman матрицы — пересчитываем только F и Q (зависят от dt)
+    dt, alpha, sigma_a = 1.0 / max(fps, 1e-5), 0.2, 0.5
     F = np.array([[1, dt], [0, 1]], dtype=np.float32)
-    Q = np.array([
-        [dt**4 / 4, dt**3 / 2],
-        [dt**3 / 2, dt**2]
-    ], dtype=np.float32) * sigma_a**2
+    Q = np.array([[dt**4 / 4, dt**3 / 2], [dt**3 / 2, dt**2]], dtype=np.float32) * sigma_a**2
 
     for box in results.boxes:
-        if int(box.cls[0]) != 0:
-            continue
-
+        if int(box.cls[0]) != 0: continue
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
         track_id = int(box.id[0]) if box.id is not None else -1
-        if track_id == -1:
-            continue
+        if track_id == -1: continue
 
-        foot_x     = (x1 + x2) // 2
-        raw_foot_y = y2
+        foot_x, raw_foot_y = (x1 + x2) // 2, y2
 
-        # Пешеход у нижнего края — критическая опасность без расчётов
+        # Логика критической близости
         if raw_foot_y >= frame_h * 0.99:
-            danger_levels[track_id] = 2
+            temp_x, _ = get_metric_coordinates(foot_x, 0.5, frame_w, fh_s, calib_data)
+            danger = 2 if abs(temp_x) <= (CAR_WIDTH_M / 2) else 1
+            danger_levels[track_id] = danger
+            active_pedestrians_metric[track_id] = (temp_x, 0.5, danger)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(frame, f"#{track_id}  <1m",
-                        (x1, max(y1 - 10, 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
-            cv2.putText(frame, f"#{track_id}  <1m",
-                        (x1, max(y1 - 10, 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1)
             continue
 
-        if raw_foot_y <= yh_s:
-            continue
+        if raw_foot_y <= yh_s: continue
         z_raw = fh_s / (raw_foot_y - yh_s)
 
-        # Инициализация трека
+        # Фильтр Калмана
         if track_id not in kalman_states:
-            kalman_states[track_id]  = np.array([z_raw, 0.0], dtype=np.float32)
-            kalman_covs[track_id]    = np.eye(2, dtype=np.float32)
-            prev_distances[track_id] = z_raw
-            speed_state[track_id]    = 0.0
+            kalman_states[track_id] = np.array([z_raw, 0.0], dtype=np.float32)
+            kalman_covs[track_id] = np.eye(2, dtype=np.float32)
+            prev_distances[track_id], speed_state[track_id] = z_raw, 0.0
 
-        # Deadband
-        prev_z = float(kalman_states[track_id][0])
-        z = prev_z if abs(z_raw - prev_z) < 0.03 else z_raw
-
-        # Kalman predict
-        x = F @ kalman_states[track_id]
-        P = F @ kalman_covs[track_id] @ F.T + Q
-
-        inn = np.array([z], dtype=np.float32) - (_kalman_H @ x)
-        S   = _kalman_H @ P @ _kalman_H.T + _kalman_R
-        K   = P @ _kalman_H.T / float(S[0, 0])  
-
-        kalman_states[track_id] = x + K.flatten() * float(inn[0])
-        kalman_covs[track_id]   = (_kalman_I - np.outer(K, _kalman_H)) @ P
+        x_k = F @ kalman_states[track_id]
+        P_k = F @ kalman_covs[track_id] @ F.T + Q
+        inn = np.array([z_raw], dtype=np.float32) - (_kalman_H @ x_k)
+        S = _kalman_H @ P_k @ _kalman_H.T + _kalman_R
+        K = P_k @ _kalman_H.T / float(S[0, 0])
+        kalman_states[track_id] = x_k + K.flatten() * float(inn[0])
+        kalman_covs[track_id] = (_kalman_I - np.outer(K, _kalman_H)) @ P_k
 
         distance = float(kalman_states[track_id][0])
 
-        # Скорость EMA
+        # Скорость и TTC
         raw_speed = (distance - prev_distances[track_id]) * fps
         prev_distances[track_id] = distance
-        speed_state[track_id]    = alpha * raw_speed + (1 - alpha) * speed_state[track_id]
-        speed = speed_state[track_id] if abs(speed_state[track_id]) >= 0.3 else 0.0
+        speed_state[track_id] = alpha * raw_speed + (1 - alpha) * speed_state[track_id]
+        speed = speed_state[track_id]
 
-        # TTC
-        ttc    = None
-        danger = 0
-        if speed < -0.1 and distance > 0:
-            ttc = min(distance / abs(speed), 10.0)
-            if distance < DIST_MIN or ttc < TTC_CRITICAL:
-                danger = 2
-            elif ttc < TTC_WARNING:
-                danger = 1
+        ttc, danger = None, 0
+        if speed < -0.1:
+            ttc = distance / abs(speed)
+            if distance < DIST_MIN or ttc < TTC_CRITICAL: danger = 2
+            elif ttc < TTC_WARNING: danger = 1
+
+        # Проверка коридора (метрическая)
+        real_x, real_z = get_metric_coordinates(foot_x, distance, frame_w, fh_s, calib_data)
+        if abs(real_x) > (CAR_WIDTH_M / 2):
+            danger = min(danger, 1)
+
         danger_levels[track_id] = danger
-
-        # Сглаживание позиции
-        if track_id not in smooth_foot_x:
-            smooth_foot_x[track_id] = float(foot_x)
-            smooth_foot_y[track_id] = float(raw_foot_y)
-        else:
-            smooth_foot_x[track_id] = alpha_pos * foot_x     + (1 - alpha_pos) * smooth_foot_x[track_id]
-            smooth_foot_y[track_id] = alpha_pos * raw_foot_y + (1 - alpha_pos) * smooth_foot_y[track_id]
+        active_pedestrians_metric[track_id] = (real_x, real_z, danger)
 
         # Отрисовка
         box_color = {0: (0, 255, 0), 1: (0, 165, 255), 2: (0, 0, 255)}[danger]
         cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+        label = f"#{track_id} {distance:.1f}m {speed*3.6:+.1f}kmh"
+        if ttc and danger > 0: label += f" TTC:{ttc:.1f}s"
+        cv2.putText(frame, label, (x1, max(y1-10, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
+        cv2.putText(frame, label, (x1, max(y1-10, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 1)
 
-        label = f"#{track_id}  {distance:.1f}m  {speed * 3.6:+.1f}km/h"
-        if ttc is not None and danger > 0:
-            label += f"  TTC:{ttc:.1f}s"
+    draw_radar(frame, active_pedestrians_metric, frame_w)
 
-        # Обводка текста
-        cv2.putText(frame, label, (x1, max(y1 - 10, 15)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
-        cv2.putText(frame, label, (x1, max(y1 - 10, 15)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 1)
-
-    # Глобальное предупреждение
     max_danger = max(danger_levels.values(), default=0)
-    h, w = frame.shape[:2]
-    y_banner = h - 40
-
     if max_danger == 2:
-        cv2.rectangle(frame, (0, y_banner), (w, h), (0, 0, 200), -1)
-        frame = put_russian_text(frame, "ОПАСНОСТЬ: ПЕШЕХОД НА ПУТИ!",
-                                 (10, h - 35), color=(255, 255, 255))
+        cv2.rectangle(frame, (0, frame_h-40), (frame_w, frame_h), (0,0,200), -1)
+        frame = put_russian_text(frame, "ОПАСНОСТЬ: ТОРМОЖЕНИЕ!", (10, frame_h-35))
     elif max_danger == 1:
-        cv2.rectangle(frame, (0, y_banner), (w, h), (0, 100, 200), -1)
-        frame = put_russian_text(frame, "ВНИМАНИЕ: Пешеход приближается",
-                                 (10, h - 35), color=(255, 255, 255))
+        cv2.rectangle(frame, (0, frame_h-40), (frame_w, frame_h), (0,100,200), -1)
+        frame = put_russian_text(frame, "ВНИМАНИЕ: Пешеход у пути", (10, frame_h-35))
 
     return frame, max_danger
 

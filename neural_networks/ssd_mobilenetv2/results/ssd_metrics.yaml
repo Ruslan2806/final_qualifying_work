@@ -1,0 +1,11 @@
+model: SSD MobileNetV3 Large
+test:
+  f1: 0.6041
+  mAP50: 0.6933
+  precision: 0.6933
+  recall: 0.5352
+validation:
+  f1: 0.5703
+  mAP50: 0.6454
+  precision: 0.6454
+  recall: 0.5109
