@@ -30,6 +30,17 @@ CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
 MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
 SETTINGS_PATH = BASE_PATH / "settings.json"
 
+CAR_ICON_PATH = BASE_PATH / "car.png"
+CAR_ICON = None
+
+if CAR_ICON_PATH.exists():
+    CAR_ICON = cv2.imread(str(CAR_ICON_PATH), cv2.IMREAD_UNCHANGED)
+    if CAR_ICON is not None:
+        target_w = 30
+        scale = target_w / CAR_ICON.shape[1]
+        target_h = int(CAR_ICON.shape[0] * scale)
+        CAR_ICON = cv2.resize(CAR_ICON, (target_w, target_h))
+
 def load_settings():
     if SETTINGS_PATH.exists():
         with open(SETTINGS_PATH, "r") as f:
@@ -97,55 +108,72 @@ def draw_safe_corridor(frame: np.ndarray, calib_data: dict,
     cv2.polylines(frame, [pts], True, (160, 160, 160), 1)
 
 def create_radar_frame(pedestrians: dict) -> np.ndarray:
-    """
-    pedestrians: {track_id: (real_x_m, dist_m, danger)}
-    Возвращает BGR изображение радара.
-    """
     RW, RH    = 320, 420
     radar     = np.full((RH, RW, 3), 18, dtype=np.uint8)
     cx        = RW // 2
-    cy        = RH - 25
-    m_to_py   = (RH - 40) / MAX_RADAR_DIST   # пикселей на метр по Y
-    m_to_px   = RW / 8.0                      # пикселей на метр по X (8м — ширина)
+    
+    icon_h, icon_w = 0, 0
+    if CAR_ICON is not None:
+        icon_h, icon_w = CAR_ICON.shape[:2]
+    else:
+        icon_h, icon_w = 40, 20
 
-    # Сетка расстояний
+    cy_bumper = RH - 40 
+    
+    m_to_py   = (RH - 80) / MAX_RADAR_DIST  # Масштаб метров
+    m_to_px   = RW / 5.0                    # Масштаб ширины (8м обзор)
+
+    # 2. Отрисовка сетки расстояний 
     for d in range(1, int(MAX_RADAR_DIST) + 1):
-        y_line = cy - int(d * m_to_py)
-        if y_line < 5:
-            continue
+        y_line = cy_bumper - int(d * m_to_py)
+        if y_line < 10: continue
         col = (55, 55, 55) if d % 2 != 0 else (85, 85, 85)
         cv2.line(radar, (20, y_line), (RW - 20, y_line), col, 1)
         if d % 2 == 0:
             cv2.putText(radar, f"{d}m", (4, y_line + 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (120, 120, 120), 1)
 
-    # Коридор на радаре
+    # Отрисовка коридора 
     car_half = int((CAR_WIDTH_M / 2) * m_to_px)
-    cv2.rectangle(radar, (cx - car_half, 10), (cx + car_half, cy), (0, 38, 0), -1)
-    cv2.line(radar, (cx, 10), (cx, cy), (50, 50, 50), 1)
+    cv2.rectangle(radar, (cx - car_half, 10), (cx + car_half, cy_bumper), (0, 38, 0), -1)
+    cv2.line(radar, (cx, 10), (cx, cy_bumper), (50, 50, 50), 1)
 
-    # Значок автомобиля
-    cv2.rectangle(radar, (cx - 8, cy - 12), (cx + 8, cy), (160, 160, 160), -1)
-    cv2.putText(radar, "CAR", (cx - 10, cy + 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
+    # Значок автомобиля 
+    if CAR_ICON is not None:
+        y1, y2 = cy_bumper, cy_bumper + icon_h
+        x1, x2 = cx - icon_w // 2, cx + icon_w // 2
+
+        if y2 <= RH and x1 >= 0 and x2 <= RW:
+            if CAR_ICON.shape[2] == 4:
+                alpha_s = CAR_ICON[:, :, 3] / 255.0
+                alpha_l = 1.0 - alpha_s
+                for c in range(0, 3):
+                    radar[y1:y2, x1:x2, c] = (alpha_s * CAR_ICON[:, :, c] +
+                                              alpha_l * radar[y1:y2, x1:x2, c])
+            else:
+                radar[y1:y2, x1:x2] = CAR_ICON[:, :, :3]
+    else:
+        cv2.rectangle(radar, (cx - 8, cy_bumper), (cx + 8, cy_bumper + 15), (160, 160, 160), -1)
 
     # Пешеходы
     for tid, (rx_m, rz_m, danger) in pedestrians.items():
         if rz_m <= 0 or rz_m > MAX_RADAR_DIST:
             continue
         px = cx + int(rx_m * m_to_px)
-        py = cy - int(rz_m * m_to_py)
+        py = cy_bumper - int(rz_m * m_to_py) 
+        
         px = int(np.clip(px, 5, RW - 5))
         py = int(np.clip(py, 5, RH - 5))
+        
         color = {0: (0, 220, 0), 1: (0, 165, 255), 2: (0, 0, 255)}[danger]
         cv2.circle(radar, (px, py), 6, color, -1)
         cv2.putText(radar, f"#{tid}", (px + 8, py + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.32, (230, 230, 230), 1)
 
-    # Подпись
-    cv2.putText(radar, "TOP VIEW", (cx - 24, RH - 6),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 100), 1)
-    cv2.rectangle(radar, (0, 0), (RW - 1, RH - 1), (70, 70, 70), 1)
+    # Подписи
+    #cv2.putText(radar, "TOP VIEW", (cx - 24, RH - 6),
+    #            cv2.FONT_HERSHEY_SIMPLEX, 0.32, (100, 100, 100), 1)
+    #cv2.rectangle(radar, (0, 0), (RW - 1, RH - 1), (70, 70, 70), 1)
 
     return radar
 
@@ -177,9 +205,6 @@ def put_russian_text(frame, text, pos, color=(255,255,255)):
 
 def process_frame(frame: np.ndarray, model, calib_data: dict,
                   fps: float, settings: dict):
-    """
-    Возвращает (processed_frame, radar_frame, max_danger).
-    """
     TTC_CRITICAL = settings["TTC_CRITICAL"]
     TTC_WARNING  = settings["TTC_WARNING"]
     DIST_MIN     = settings["DIST_MIN"]
@@ -313,7 +338,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
 
         # Отрисовка бокса
         box_color = {0: (0, 255, 0), 1: (0, 165, 255), 2: (0, 0, 255)}[danger]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 1)
 
         label = f"#{track_id}  {distance:.1f}m  {speed * 3.6:+.1f}km/h"
         if ttc is not None and danger > 0:
@@ -568,16 +593,6 @@ class MainWindow(QMainWindow):
     # ── Dashboard ─────────────────────────────────────────────────────────────
 
     def _build_dashboard(self):
-        """
-        Layout:
-        ┌─────────────────────┬──────────────┐
-        │                     │  Зона 2      │
-        │   Зона 1 (видео)    │  Радар       │
-        │                     ├──────────────┤
-        │                     │  Зона 3      │
-        │                     │  Инфо-панель │
-        └─────────────────────┴──────────────┘
-        """
         page = QWidget()
         root = QHBoxLayout(page)
         root.setContentsMargins(12, 12, 12, 12)
@@ -634,7 +649,6 @@ class MainWindow(QMainWindow):
         self.lbl_warn.setFont(QFont("Segoe UI", 13, QFont.Bold))
         warn_lay.addWidget(self.lbl_warn)
 
-        # !!! ВАЖНО: Вызываем настройку стиля только ПОСЛЕ создания lbl_warn !!!
         self._set_warn_style(0)
 
         right.addWidget(self.warn_panel)
