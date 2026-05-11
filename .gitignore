@@ -6,6 +6,7 @@ neural_networks/yolov8/results
 neural_networks/rf_detr_nano/results
 
 dataset/
+runs/ 
 
 camera_calibration/*
 

@@ -1,0 +1,56 @@
+[
+    {
+        "model": "YOLOv8n",
+        "all": {
+            "mAP50": 0.9789,
+            "Recall": 0.9451,
+            "Lat_ms": 11.18
+        },
+        "day": {
+            "mAP50": 0.9848,
+            "Recall": 0.9534,
+            "Lat_ms": 8.92
+        },
+        "night": {
+            "mAP50": 0.9685,
+            "Recall": 0.9214,
+            "Lat_ms": 9.88
+        }
+    },
+    {
+        "model": "RT-DETR-L",
+        "all": {
+            "mAP50": 0.9724,
+            "Recall": 0.9541,
+            "Lat_ms": 49.01
+        },
+        "day": {
+            "mAP50": 0.9842,
+            "Recall": 0.9627,
+            "Lat_ms": 42.92
+        },
+        "night": {
+            "mAP50": 0.9451,
+            "Recall": 0.9394,
+            "Lat_ms": 44.48
+        }
+    },
+    {
+        "model": "SSD_MobV3",
+        "all": {
+            "mAP50": 0.9364,
+            "Recall": 0.7205,
+            "Lat_ms": 22.55
+        },
+        "day": {
+            "mAP50": 0.9686,
+            "Recall": 0.738,
+            "Lat_ms": 22.59
+        },
+        "night": {
+            "mAP50": 0.8902,
+            "Recall": 0.6948,
+            "Lat_ms": 24.66
+        }
+    }
+]

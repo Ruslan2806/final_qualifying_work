@@ -2,5 +2,5 @@
     "TTC_CRITICAL": 2.0,
     "TTC_WARNING": 5.0,
     "DIST_MIN": 1.0,
-    "sound_enabled": false
+    "sound_enabled": true
 }
