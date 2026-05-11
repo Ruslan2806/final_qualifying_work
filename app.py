@@ -36,10 +36,10 @@ CAR_ICON = None
 if CAR_ICON_PATH.exists():
     CAR_ICON = cv2.imread(str(CAR_ICON_PATH), cv2.IMREAD_UNCHANGED)
     if CAR_ICON is not None:
-        target_w = 30
-        scale = target_w / CAR_ICON.shape[1]
-        target_h = int(CAR_ICON.shape[0] * scale)
-        CAR_ICON = cv2.resize(CAR_ICON, (target_w, target_h))
+        max_dim = max(CAR_ICON.shape[:2])
+        #if max_dim > 512:
+        #    scale = 512 / max_dim
+        #    CAR_ICON = cv2.resize(CAR_ICON, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
 def load_settings():
     if SETTINGS_PATH.exists():
@@ -146,7 +146,7 @@ def create_radar_frame(pedestrians: dict, settings: dict) -> np.ndarray:
         icon_w = target_w
         icon_h = int(icon_w * aspect_ratio)
         
-        temp_icon = cv2.resize(CAR_ICON, (icon_w, icon_h))
+        temp_icon = cv2.resize(CAR_ICON, (icon_w, icon_h), interpolation=cv2.INTER_LANCZOS4)
 
         x1 = cx - icon_w // 2
         x2 = x1 + icon_w
