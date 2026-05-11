@@ -18,7 +18,7 @@ import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QFileDialog,
                              QComboBox, QStackedWidget, QMessageBox, QProgressBar,
-                             QDialog, QFormLayout, QDoubleSpinBox, QCheckBox, QFrame)
+                             QDialog, QFormLayout, QDoubleSpinBox, QCheckBox, QFrame, QSizePolicy)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
 from PyQt5.QtGui import QImage, QPixmap, QPalette, QColor, QFont
 from PyQt5.QtMultimedia import QSoundEffect
@@ -50,13 +50,15 @@ def load_settings():
             "TTC_CRITICAL": 2.0,
             "TTC_WARNING": 6.0,
             "DIST_MIN": 1.0,
-            "sound_enabled": True
+            "sound_enabled": True,
+            "CAR_WIDTH_M": 0.5,         
+            "MAX_RADAR_DIST": 5.0,      
+            "RADAR_VISIBLE_WIDTH_M": 3.0 
         }
 
 def save_settings(settings):
     with open(SETTINGS_PATH, "w") as f:
         json.dump(settings, f, indent=4)
-
 
 # ── Глобальные состояния ──────────────────────────────────────────────────────
 prev_distances  = {}
@@ -72,9 +74,6 @@ _frame_counter  = 0
 
 MAX_TRACK_AGE   = 90   
 
-CAR_WIDTH_M = 0.5  # Ширина автомобиля в метрах
-MAX_RADAR_DIST = 5.0 # Максимальная дистанция на радаре
-
 _kalman_H = np.array([[1, 0]], dtype=np.float32)
 _kalman_R = np.array([[0.05]], dtype=np.float32)
 _kalman_I = np.eye(2, dtype=np.float32)
@@ -88,7 +87,7 @@ def get_metric_coordinates(foot_x, distance, frame_w, fh_s, calib_data):
     return real_x, distance
 
 def draw_safe_corridor(frame: np.ndarray, calib_data: dict,
-                       fh_s: float, yh_s: float) -> None:
+                       fh_s: float, yh_s: float, settings: dict) -> None:
     h, w    = frame.shape[:2]
     cam_h   = calib_data.get("camera_height_m", 0.5)
     focal   = fh_s / cam_h
@@ -96,7 +95,7 @@ def draw_safe_corridor(frame: np.ndarray, calib_data: dict,
     pts     = []
 
     for z in [15.0, 0.3]:
-        x_off = (CAR_WIDTH_M / 2) * focal / z
+        x_off = (settings["CAR_WIDTH_M"] / 2) * focal / z
         y_px  = int(fh_s / z + yh_s)
         pts.append([int(cx - x_off), y_px])
         pts.insert(0, [int(cx + x_off), y_px])
@@ -107,15 +106,20 @@ def draw_safe_corridor(frame: np.ndarray, calib_data: dict,
     cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
     cv2.polylines(frame, [pts], True, (160, 160, 160), 1)
 
-def create_radar_frame(pedestrians: dict) -> np.ndarray:
+def create_radar_frame(pedestrians: dict, settings: dict) -> np.ndarray:
+    
+    MAX_RADAR_DIST = settings["MAX_RADAR_DIST"]
+    RADAR_VISIBLE_WIDTH_M = settings["RADAR_VISIBLE_WIDTH_M"]
+    CAR_WIDTH_M = settings["CAR_WIDTH_M"]
+
     RW, RH    = 320, 420
     radar     = np.full((RH, RW, 3), 18, dtype=np.uint8)
     cx        = RW // 2
     
     cy_bumper = RH - 60 
     
-    m_to_py   = (RH - 100) / MAX_RADAR_DIST  # Масштаб метров по вертикали
-    m_to_px   = RW / 3.0                     # Масштаб ширины (3 метра на всю ширину радара)
+    m_to_py   = (RH - 100) / MAX_RADAR_DIST 
+    m_to_px   = RW / RADAR_VISIBLE_WIDTH_M                    
 
     # Рассчитываем точную ширину коридора
     target_w = int(CAR_WIDTH_M * m_to_px)
@@ -209,6 +213,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
     TTC_CRITICAL = settings["TTC_CRITICAL"]
     TTC_WARNING  = settings["TTC_WARNING"]
     DIST_MIN     = settings["DIST_MIN"]
+    CAR_WIDTH_M  = settings["CAR_WIDTH_M"]
 
     fh        = calib_data["fh"]
     y_horizon = calib_data["y_horizon"]
@@ -221,7 +226,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
     focal_px  = fh_s / cam_h
 
     # Коридор безопасности
-    draw_safe_corridor(frame, calib_data, fh_s, yh_s)
+    draw_safe_corridor(frame, calib_data, fh_s, yh_s, settings)
 
     results = model.track(
         frame, conf=0.4, verbose=False, device=0,
@@ -232,7 +237,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
     active_pedestrians: dict = {}   # {track_id: (real_x, dist, danger)}
 
     if results.boxes is None or len(results.boxes) == 0:
-        radar = create_radar_frame({})
+        radar = create_radar_frame({}, settings)
         return frame, radar, 0
 
     # Активные треки
@@ -350,7 +355,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
         cv2.putText(frame, label, (x1, max(y1 - 10, 15)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, box_color, 1)
 
-    radar      = create_radar_frame(active_pedestrians)
+    radar      = create_radar_frame(active_pedestrians, settings)
     max_danger = max(danger_levels.values(), default=0)
 
     return frame, radar, max_danger
@@ -377,9 +382,22 @@ class SettingsDialog(QDialog):
         self.sound_checkbox = QCheckBox("Включить звук")
         self.sound_checkbox.setChecked(settings["sound_enabled"])
 
+        self.car_width = QDoubleSpinBox()
+        self.car_width.setValue(settings.get("CAR_WIDTH_M", 0.5))
+        
+        self.max_radar_dist = QDoubleSpinBox()
+        self.max_radar_dist.setValue(settings.get("MAX_RADAR_DIST", 5.0))
+        
+        self.radar_visible_w = QDoubleSpinBox()
+        self.radar_visible_w.setValue(settings.get("RADAR_VISIBLE_WIDTH_M", 3.0))
+
+
         layout.addRow("TTC критический:", self.ttc_critical)
         layout.addRow("TTC предупреждение:", self.ttc_warning)
-        layout.addRow("Мин. дистанция:", self.dist_min)
+        layout.addRow("Мин. дистанция:", self.dist_min)        
+        layout.addRow("Ширина авто (м):", self.car_width)
+        layout.addRow("Макс. дист. радара (м):", self.max_radar_dist)
+        layout.addRow("Ширина обзора радара (м):", self.radar_visible_w)
         layout.addRow(self.sound_checkbox)
 
         btn_save = QPushButton("Сохранить")
@@ -400,6 +418,10 @@ class SettingsDialog(QDialog):
         self.settings["TTC_WARNING"]  = self.ttc_warning.value()
         self.settings["DIST_MIN"]     = self.dist_min.value()
         self.settings["sound_enabled"] = self.sound_checkbox.isChecked()
+
+        self.settings["CAR_WIDTH_M"] = self.car_width.value()
+        self.settings["MAX_RADAR_DIST"] = self.max_radar_dist.value()
+        self.settings["RADAR_VISIBLE_WIDTH_M"] = self.radar_visible_w.value()
 
         save_settings(self.settings)
         self.accept()
@@ -630,7 +652,10 @@ class MainWindow(QMainWindow):
 
         # Зона 2: Радар
         self.lbl_radar = QLabel()
-        self.lbl_radar.setFixedSize(320, 420)
+        #self.lbl_radar.setFixedSize(320, 420)
+        self.lbl_radar.setMinimumSize(320, 420)
+        self.lbl_radar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
         self.lbl_radar.setStyleSheet(
             "background:#111; border:1px solid #444; border-radius:6px;"
         )
@@ -639,7 +664,8 @@ class MainWindow(QMainWindow):
 
         # Зона 3: Информационная панель
         self.warn_panel = QFrame()
-        self.warn_panel.setFixedSize(320, 160)
+        #self.warn_panel.setFixedSize(320, 160)
+        self.warn_panel.setMinimumSize(320, 160)
         
         warn_lay = QVBoxLayout(self.warn_panel)
         warn_lay.setContentsMargins(10, 10, 10, 10)
@@ -800,7 +826,13 @@ class MainWindow(QMainWindow):
         rgb_r = cv2.cvtColor(radar, cv2.COLOR_BGR2RGB)
         qr    = QImage(rgb_r.data, rgb_r.shape[1], rgb_r.shape[0],
                        rgb_r.shape[1] * 3, QImage.Format_RGB888)
-        self.lbl_radar.setPixmap(QPixmap.fromImage(qr))
+        
+        self.lbl_radar.setPixmap(
+            QPixmap.fromImage(qr).scaled(
+                self.lbl_radar.width(), self.lbl_radar.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+        )
 
         # Зона 3 — информационная панель
         self._set_warn_style(danger)
@@ -879,5 +911,6 @@ if __name__ == "__main__":
     app.setPalette(pal)
 
     win = MainWindow()
-    win.show()
+    #win.show()
+    win.showMaximized()
     sys.exit(app.exec_())
