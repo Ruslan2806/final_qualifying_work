@@ -1,0 +1,53 @@
+[
+    {
+        "model": "YOLOv8n",
+        "day": {
+            "Precision": 0.9461,
+            "Recall": 0.9534,
+            "mAP50": 0.9848,
+            "mAP50_95": 0.8048,
+            "Lat_ms": 12.89
+        },
+        "night": {
+            "Precision": 0.9064,
+            "Recall": 0.9214,
+            "mAP50": 0.9685,
+            "mAP50_95": 0.6738,
+            "Lat_ms": 9.84
+        }
+    },
+    {
+        "model": "RT-DETR-L",
+        "day": {
+            "Precision": 0.9334,
+            "Recall": 0.9627,
+            "mAP50": 0.9842,
+            "mAP50_95": 0.7909,
+            "Lat_ms": 46.7
+        },
+        "night": {
+            "Precision": 0.8668,
+            "Recall": 0.9394,
+            "mAP50": 0.9451,
+            "mAP50_95": 0.6734,
+            "Lat_ms": 47.21
+        }
+    },
+    {
+        "model": "SSD_MobV3",
+        "day": {
+            "Precision": 0.9686,
+            "Recall": 0.738,
+            "mAP50": 0.9686,
+            "mAP50_95": 0.7292,
+            "Lat_ms": 23.05
+        },
+        "night": {
+            "Precision": 0.8902,
+            "Recall": 0.6948,
+            "mAP50": 0.8902,
+            "mAP50_95": 0.5653,
+            "Lat_ms": 23.32
+        }
+    }
+]

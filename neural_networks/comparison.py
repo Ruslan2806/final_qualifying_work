@@ -15,13 +15,11 @@ from torchvision.models.detection.ssdlite import SSDLiteClassificationHead
 from functools import partial
 from ultralytics import YOLO, RTDETR
 
-# --- 1. НАСТРОЙКИ GPU ДЛЯ RTX 5050 (Blackwell) ---
 os.environ['TORCH_CUDA_ARCH_LIST'] = '9.0'
 os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
 torch.backends.cudnn.enabled = False 
 torch.backends.cuda.matmul.allow_tf32 = False
 
-# --- 2. ПУТИ ---
 SCRIPT_PATH = Path(__file__).resolve()
 BASE_PATH   = SCRIPT_PATH.parent.parent
 DATASET_DIR = BASE_PATH / "dataset"
@@ -34,10 +32,6 @@ MODELS_CONFIG = [
     {"name": "RT-DETR-L", "path": BASE_PATH / "neural_networks/rf_detr_nano/weights/rtdetr_best.pt", "type": "ultralytics"},
     {"name": "SSD_MobV3", "path": BASE_PATH / "neural_networks/ssd_mobilenetv2/weights/ssd_best.pt", "type": "ssd"}
 ]
-
-# =====================================================================
-# ЛОГИКА SSD (ПОЛНОЕ ВОССОЗДАНИЕ ИЗ SSD_MOBILENETV2.PY)
-# =====================================================================
 
 def build_ssd_model(num_classes=2):
     model = ssdlite320_mobilenet_v3_large(weights=None, weights_backbone=None)
@@ -56,23 +50,26 @@ def ssd_box_iou(box, boxes):
     area2 = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
     return inter / (area1 + area2 - inter + 1e-6)
 
-def ssd_match_boxes(pred_boxes, gt_boxes):
-    if len(gt_boxes) == 0: return 0, len(pred_boxes), 0
-    if len(pred_boxes) == 0: return 0, 0, len(gt_boxes)
-    matched_gt = set()
-    tp, fp = 0, 0
-    for pb in pred_boxes:
-        ious = ssd_box_iou(pb.unsqueeze(0), gt_boxes)
-        best_iou, best_idx = ious.max(0)
-        if best_iou >= 0.5 and int(best_idx) not in matched_gt:
-            tp += 1
-            matched_gt.add(int(best_idx))
-        else: fp += 1
-    return tp, fp, len(gt_boxes) - len(matched_gt)
-
-# =====================================================================
-# ТЕСТОВЫЕ ДВИЖКИ
-# =====================================================================
+def calculate_ssd_metrics(pred_boxes, gt_boxes, iou_thresholds):
+    results = []
+    for iou_th in iou_thresholds:
+        if len(gt_boxes) == 0:
+            results.append({'tp': 0, 'fp': len(pred_boxes), 'fn': 0})
+            continue
+        if len(pred_boxes) == 0:
+            results.append({'tp': 0, 'fp': 0, 'fn': len(gt_boxes)})
+            continue
+            
+        matched_gt = set()
+        tp = 0
+        for pb in pred_boxes:
+            ious = ssd_box_iou(pb.unsqueeze(0), gt_boxes)
+            best_iou, best_idx = ious.max(0)
+            if best_iou >= iou_th and int(best_idx) not in matched_gt:
+                tp += 1
+                matched_gt.add(int(best_idx))
+        results.append({'tp': tp, 'fp': len(pred_boxes) - tp, 'fn': len(gt_boxes) - len(matched_gt)})
+    return results
 
 def get_test_subsets():
     img_dir = DATASET_DIR / "images" / "Test"
@@ -85,7 +82,7 @@ def get_test_subsets():
     return day, night
 
 def validate_ultralytics(cfg, file_list, subset_name):
-    print(f"   - Валидация {subset_name}...")
+    print(f"   - Валидация {cfg['name']} ({subset_name})...")
     model = RTDETR(str(cfg['path'])) if "rtdetr" in cfg['name'].lower() else YOLO(str(cfg['path']))
     
     tmp_txt = DATASET_DIR / f"tmp_list_{subset_name}.txt"
@@ -94,25 +91,28 @@ def validate_ultralytics(cfg, file_list, subset_name):
     with open(DATA_YAML) as f: y_cfg = yaml.safe_load(f)
     y_cfg.update({'path': '', 'test': str(tmp_txt.resolve())})
     tmp_yaml = DATASET_DIR / f"tmp_yaml_{subset_name}.yaml"
-    with open(tmp_yaml, 'w') as f: yaml.dump(y_cfg, f)
+    with open(tmp_yaml, 'w', encoding='utf-8') as f: yaml.dump(y_cfg, f)
 
     results = model.val(data=str(tmp_yaml), split='test', imgsz=640, batch=1, device=0, verbose=False, plots=False)
-    
     os.remove(tmp_txt); os.remove(tmp_yaml)
+    
     return {
-        "mAP50": round(results.box.map50, 4),
+        "Precision": round(results.box.p.mean(), 4),
         "Recall": round(results.box.r.mean(), 4),
+        "mAP50": round(results.box.map50, 4),
+        "mAP50_95": round(results.box.map, 4),
         "Lat_ms": round(results.speed['inference'], 2)
     }
 
 def validate_ssd(cfg, file_list, subset_name):
-    print(f"   - Валидация {subset_name}...")
+    print(f"   - Валидация {cfg['name']} ({subset_name})...")
     model = build_ssd_model().to("cuda")
     model.load_state_dict(torch.load(cfg['path'], map_location="cuda"))
     model.eval()
     
     transform = transforms.Compose([transforms.ToTensor()])
-    tp_t, fp_t, fn_t = 0, 0, 0
+    iou_ths = np.linspace(0.5, 0.95, 10) # Пороги для mAP50-95
+    stats = {th: {'tp': 0, 'fp': 0, 'fn': 0} for th in iou_ths}
     latencies = []
 
     with torch.no_grad():
@@ -120,12 +120,10 @@ def validate_ssd(cfg, file_list, subset_name):
             img_pil = Image.open(p).convert("RGB").resize((320, 320))
             img_t = transform(img_pil).unsqueeze(0).to("cuda")
             
-            # Замер времени
             t1 = time.perf_counter()
             preds = model(img_t)
             latencies.append((time.perf_counter() - t1) * 1000)
 
-            # Расчет метрик (как в вашем скрипте)
             label_p = Path(p.replace("images", "labels")).with_suffix(".txt")
             gt_boxes = []
             with open(label_p) as f:
@@ -136,64 +134,90 @@ def validate_ssd(cfg, file_list, subset_name):
             gt_boxes = torch.tensor(gt_boxes)
             p_boxes = preds[0]["boxes"].cpu()[preds[0]["scores"].cpu() >= 0.5]
             
-            tp, fp, fn = ssd_match_boxes(p_boxes, gt_boxes)
-            tp_t += tp; fp_t += fp; fn_t += fn
+            frame_stats = calculate_ssd_metrics(p_boxes, gt_boxes, iou_ths)
+            for i, th in enumerate(iou_ths):
+                stats[th]['tp'] += frame_stats[i]['tp']
+                stats[th]['fp'] += frame_stats[i]['fp']
+                stats[th]['fn'] += frame_stats[i]['fn']
 
-    p = tp_t / (tp_t + fp_t + 1e-6)
-    r = tp_t / (tp_t + fn_t + 1e-6)
-    return {"mAP50": round(p, 4), "Recall": round(r, 4), "Lat_ms": round(np.mean(latencies), 2)}
+    aps = []
+    for th in iou_ths:
+        p = stats[th]['tp'] / (stats[th]['tp'] + stats[th]['fp'] + 1e-6)
+        r = stats[th]['tp'] / (stats[th]['tp'] + stats[th]['fn'] + 1e-6)
+        aps.append(p) 
+    
+    return {
+        "Precision": round(aps[0], 4),
+        "Recall": round(stats[0.5]['tp'] / (stats[0.5]['tp'] + stats[0.5]['fn'] + 1e-6), 4),
+        "mAP50": round(aps[0], 4),
+        "mAP50_95": round(np.mean(aps), 4),
+        "Lat_ms": round(np.mean(latencies), 2)
+    }
 
-# =====================================================================
-# ОСНОВНОЙ ЦИКЛ
-# =====================================================================
+def plot_accuracy_matrix(report):
+    metrics = ["Precision", "Recall", "mAP50", "mAP50_95"]
+    models = [r['model'] for r in report]
+    x = np.arange(len(models))
+    width = 0.35
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle('Сравнение метрик точности: День vs Ночь', fontsize=18, fontweight='bold')
+    
+    axes = axes.flatten()
+    colors = {'day': '#f1c40f', 'night': '#34495e'}
+
+    for i, m in enumerate(metrics):
+        day_vals = [r['day'][m] for r in report]
+        night_vals = [r['night'][m] for r in report]
+        
+        axes[i].bar(x - width/2, day_vals, width, label='День', color=colors['day'], edgecolor='black', alpha=0.8)
+        axes[i].bar(x + width/2, night_vals, width, label='Ночь', color=colors['night'], edgecolor='black', alpha=0.9)
+        
+        axes[i].set_title(f'Метрика: {m}', fontsize=14, fontweight='bold')
+        axes[i].set_xticks(x)
+        axes[i].set_xticklabels(models)
+        axes[i].set_ylim(0, 1.1)
+        axes[i].grid(axis='y', linestyle='--', alpha=0.5)
+        if i == 0: axes[i].legend()
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(OUTPUT_DIR / "accuracy.png", dpi=150)
 
 def main():
     day_files, night_files = get_test_subsets()
-    all_files = day_files + night_files
     report = []
 
     for cfg in MODELS_CONFIG:
-        print(f"\n>>> СРАВНЕНИЕ МОДЕЛИ: {cfg['name']}")
-        if not cfg['path'].exists():
-            print(f"!!! Файл {cfg['path'].name} не найден. Пропуск.")
-            continue
+        print(f"\n>>> СТАРТ ТЕСТА: {cfg['name']}")
+        if not cfg['path'].exists(): continue
 
         if cfg['type'] == "ultralytics":
-            res_all   = validate_ultralytics(cfg, all_files, "all")
-            res_day   = validate_ultralytics(cfg, day_files, "day")
+            res_day = validate_ultralytics(cfg, day_files, "day")
             res_night = validate_ultralytics(cfg, night_files, "night")
         else:
-            res_all   = validate_ssd(cfg, all_files, "all")
-            res_day   = validate_ssd(cfg, day_files, "day")
+            res_day = validate_ssd(cfg, day_files, "day")
             res_night = validate_ssd(cfg, night_files, "night")
 
         report.append({
             "model": cfg['name'],
-            "all": res_all, "day": res_day, "night": res_night
+            "day": res_day,
+            "night": res_night
         })
 
-    # Сохранение JSON
-    with open(OUTPUT_DIR / "comparison_results.json", "w", encoding="utf-8") as f:
+    with open(OUTPUT_DIR / "comparison_report.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=4)
 
-    # ПОСТРОЕНИЕ ГРАФИКОВ
-    names = [r['model'] for r in report]
-    m_day = [r['day']['mAP50'] for r in report]
-    m_night = [r['night']['mAP50'] for r in report]
-    lats = [r['all']['Lat_ms'] for r in report]
-
-    x = np.arange(len(names))
-    plt.figure(figsize=(12, 6))
-    plt.bar(x - 0.2, m_day, 0.4, label='День (mAP50)', color='#f1c40f')
-    plt.bar(x + 0.2, m_night, 0.4, label='Ночь (mAP50)', color='#34495e')
-    plt.xticks(x, names); plt.ylabel('Точность'); plt.legend(); plt.grid(axis='y', alpha=0.3)
-    plt.title('Сравнение точности детектирования'); plt.savefig(OUTPUT_DIR / "accuracy.png")
+    plot_accuracy_matrix(report)
 
     plt.figure(figsize=(10, 6))
-    plt.bar(names, lats, color='#e74c3c')
-    plt.ylabel('Задержка (мс)'); plt.title('Среднее время инференса (batch=1)'); plt.savefig(OUTPUT_DIR / "latency.png")
+    lats = [r['day']['Lat_ms'] for r in report]
+    plt.bar([r['model'] for r in report], lats, color='#e74c3c', edgecolor='black')
+    plt.title('Скорость обработки (Inference Time)', fontsize=14, fontweight='bold')
+    plt.ylabel('ms (миллисекунды)')
+    plt.grid(axis='y', alpha=0.3)
+    plt.savefig(OUTPUT_DIR / "latency.png")
 
-    print(f"\nГотово! Отчет и графики сохранены в: {OUTPUT_DIR}")
+    print(f"\nСравнение завершено. Результаты в папке: {OUTPUT_DIR}")
 
 if __name__ == "__main__":
     main()
