@@ -73,6 +73,7 @@ track_last_seen = {}
 _frame_counter  = 0
 
 MAX_TRACK_AGE   = 90   
+TIME_TO_LOG_CALMAN = 10.0
 
 _kalman_H = np.array([[1, 0]], dtype=np.float32)
 _kalman_R = np.array([[0.05]], dtype=np.float32)
@@ -235,10 +236,11 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
 
     danger_levels.clear()
     active_pedestrians: dict = {}   # {track_id: (real_x, dist, danger)}
+    telemetry_data = {}
 
     if results.boxes is None or len(results.boxes) == 0:
         radar = create_radar_frame({}, settings)
-        return frame, radar, 0
+        return frame, radar, 0, {}
 
     # Активные треки
     active_ids = {
@@ -320,6 +322,12 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
         speed_state[track_id]    = alpha * raw_speed + (1 - alpha) * speed_state[track_id]
         speed = speed_state[track_id] if abs(speed_state[track_id]) >= 0.3 else 0.0
 
+        telemetry_data[track_id] = {
+                    "z_raw": float(z_raw),
+                    "z_filt": float(distance),
+                    "v_filt": float(speed)
+                }
+        
         # TTC и опасность
         ttc    = None
         danger = 0
@@ -358,7 +366,7 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
     radar      = create_radar_frame(active_pedestrians, settings)
     max_danger = max(danger_levels.values(), default=0)
 
-    return frame, radar, max_danger
+    return frame, radar, max_danger, telemetry_data
 
 class SettingsDialog(QDialog):
     def __init__(self, settings, parent=None):
@@ -472,10 +480,10 @@ class VideoWorker(QThread):
             ret, frame = cap.read()
             if not ret:
                 break
-            f, radar, danger = process_frame(frame, self.model,
+            f, radar, danger, telemetry  = process_frame(frame, self.model,
                                              self.calib_data, fps, self.settings)
             out.write(f)
-            self.frame_ready.emit((f, radar, danger))
+            self.frame_ready.emit((f, radar, danger, telemetry))
             processed += 1
             if total > 0:
                 self.progress_changed.emit(int(processed / total * 100))
@@ -483,7 +491,6 @@ class VideoWorker(QThread):
         cap.release()
         out.release()
         self.finished.emit(self.output_path)
-
 
 class CameraWorker(QThread):
     frame_ready = pyqtSignal(object)
@@ -537,6 +544,21 @@ class MainWindow(QMainWindow):
         self._build_dashboard()  # index 1
         self.stack.setCurrentIndex(0)
 
+        self.is_recording_log = False
+        self.log_start_time = 0
+        self.last_log_capture_time = 0
+        self.captured_data = []
+        self.setFocusPolicy(Qt.StrongFocus) # Чтобы ловить нажатия клавиш
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_P:
+            if not self.is_recording_log:
+                print("Начало записи телеметрии (5 секунд)...")
+                self.captured_data = []
+                self.log_start_time = time.time()
+                self.last_log_capture_time = 0
+                self.is_recording_log = True
+        super().keyPressEvent(event)
     # ── Инициализация ─────────────────────────────────────────────────────────
 
     def _init_sounds(self):
@@ -808,8 +830,28 @@ class MainWindow(QMainWindow):
             self.btn_toggle.setText("⏹  Остановить")
             self.btn_toggle.setStyleSheet(self._btn("#c0392b"))
 
+    def _save_telemetry_json(self):
+        with open("telemetry_log.json", "w") as f:
+            json.dump(self.captured_data, f, indent=4)
+        QMessageBox.information(self, "Лог сохранен", "Данные записаны в telemetry_log.json")
+
     def _update_dashboard(self, data):
-        frame, radar, danger = data
+        frame, radar, danger, telemetry  = data
+
+        if self.is_recording_log:
+            now = time.time()
+            elapsed = now - self.log_start_time
+            
+            if elapsed > TIME_TO_LOG_CALMAN:
+                self.is_recording_log = False
+                self._save_telemetry_json()
+            elif now - self.last_log_capture_time >= 0.2: # 1/5 секунды
+                if telemetry:
+                    first_id = list(telemetry.keys())[0]
+                    entry = telemetry[first_id]
+                    entry["timestamp"] = round(elapsed, 2)
+                    self.captured_data.append(entry)
+                    self.last_log_capture_time = now
 
         # Зона 1 — видео
         rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

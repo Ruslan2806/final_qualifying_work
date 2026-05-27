@@ -2,7 +2,7 @@
     "TTC_CRITICAL": 2.0,
     "TTC_WARNING": 5.0,
     "DIST_MIN": 1.0,
-    "sound_enabled": false,
+    "sound_enabled": true,
     "CAR_WIDTH_M": 0.5,
     "MAX_RADAR_DIST": 5.0,
     "RADAR_VISIBLE_WIDTH_M": 3.0

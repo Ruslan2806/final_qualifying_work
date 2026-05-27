@@ -1,6 +1,6 @@
 [
     {
-        "model": "YOLOv8n",
+        "model": "YOLOv12",
         "day": {
             "Precision": 0.9461,
             "Recall": 0.9534,
@@ -17,7 +17,7 @@
         }
     },
     {
-        "model": "RT-DETR-L",
+        "model": "RT-DETR",
         "day": {
             "Precision": 0.9334,
             "Recall": 0.9627,

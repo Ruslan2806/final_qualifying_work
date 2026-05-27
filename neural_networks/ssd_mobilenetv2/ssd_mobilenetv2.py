@@ -43,8 +43,6 @@ PATIENCE      = 10
 # ─── Датасет ─────────────────────────────────────────────────────────────────
 
 class YOLODetectionDataset(Dataset):
-    """Читает датасет в формате YOLO и возвращает данные для torchvision SSD."""
-
     def __init__(self, images_dir: Path, img_size: int = 320):
         self.img_size  = img_size
         self.images    = []
@@ -63,20 +61,17 @@ class YOLODetectionDataset(Dataset):
         self.transform = transforms.Compose([
             transforms.ToTensor(),
         ])
-
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
         img_path = self.images[idx]
 
-        # Загрузка и ресайз изображения
         img = Image.open(img_path).convert("RGB")
         orig_w, orig_h = img.size
         img = img.resize((self.img_size, self.img_size))
-        img_tensor = self.transform(img)   # [3, H, W], float [0,1]
+        img_tensor = self.transform(img)  
 
-        # Загрузка разметки
         boxes  = []
         labels = []
 
@@ -91,13 +86,11 @@ class YOLODetectionDataset(Dataset):
                     cls_id = int(parts[0])
                     cx, cy, bw, bh = map(float, parts[1:5])
 
-                    # YOLO → абсолютные координаты в img_size
                     x1 = (cx - bw / 2) * self.img_size
                     y1 = (cy - bh / 2) * self.img_size
                     x2 = (cx + bw / 2) * self.img_size
                     y2 = (cy + bh / 2) * self.img_size
 
-                    # Клипаем в границы
                     x1 = max(0.0, min(x1, self.img_size - 1))
                     y1 = max(0.0, min(y1, self.img_size - 1))
                     x2 = max(x1 + 1, min(x2, self.img_size))
