@@ -725,15 +725,15 @@ class MainWindow(QMainWindow):
         root.addLayout(right, stretch=1)
 
         self.stack.addWidget(page)
-
+  #"СНИЖЕНИЕ СКОРОСТИ\nпешеход на траектории движения"
     def _set_warn_style(self, danger: int):
         styles = {
             0: ("background:#0a2a0a; border:2px solid #2ecc71; border-radius:10px;",
                 "color:#00e676; border:none;", "ПУТЬ СВОБОДЕН"),
             1: ("background:#2a1a00; border:2px solid #f39c12; border-radius:10px;",
-                "color:#f39c12; border:none;", "ЭКСТРЕННОЕ ТОРМОЖЕНИЕ\nкритическая угроза столкновения"),
+                "color:#f39c12; border:none;", "СНИЖЕНИЕ СКОРОСТИ\nпешеход на траектории движения"),
             2: ("background:#2a0000; border:3px solid #e74c3c; border-radius:10px;",
-                "color:#ff4444; border:none;", "СНИЖЕНИЕ СКОРОСТИ\nпешеход на траектории движения"),
+                "color:#ff4444; border:none;", "ЭКСТРЕННОЕ ТОРМОЖЕНИЕ\nкритическая угроза столкновения"),
         }
         panel_style, text_style, text = styles[danger]
         self.warn_panel.setStyleSheet(panel_style)
