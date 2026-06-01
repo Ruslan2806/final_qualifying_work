@@ -226,7 +226,6 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
     cam_h     = calib_data.get("camera_height_m", 0.5)
     focal_px  = fh_s / cam_h
 
-    # Коридор безопасности
     draw_safe_corridor(frame, calib_data, fh_s, yh_s, settings)
 
     results = model.track(
@@ -235,14 +234,13 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
     )[0]
 
     danger_levels.clear()
-    active_pedestrians: dict = {}   # {track_id: (real_x, dist, danger)}
+    active_pedestrians: dict = {}   
     telemetry_data = {}
 
     if results.boxes is None or len(results.boxes) == 0:
         radar = create_radar_frame({}, settings)
         return frame, radar, 0, {}
 
-    # Активные треки
     active_ids = {
         int(b.id[0]) for b in results.boxes
         if b.id is not None and int(b.cls[0]) == 0
@@ -272,7 +270,6 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
         foot_x     = (x1 + x2) // 2
         raw_foot_y = y2
 
-        # Критически близкий пешеход
         if raw_foot_y >= frame_h * 0.99:
             real_x = (foot_x - frame_w / 2) * 0.5 / focal_px
             danger = 2 if abs(real_x) <= CAR_WIDTH_M / 2 else 1
@@ -292,7 +289,6 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
 
         z_raw = fh_s / (raw_foot_y - yh_s)
 
-        # Инициализация Kalman
         if track_id not in kalman_states:
             kalman_states[track_id]  = np.array([z_raw, 0.0], dtype=np.float32)
             kalman_covs[track_id]    = np.eye(2, dtype=np.float32)
@@ -301,11 +297,9 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
             smooth_foot_x[track_id] = float(foot_x)
             smooth_foot_y[track_id] = float(raw_foot_y)
 
-        # Deadband
         prev_z = float(kalman_states[track_id][0])
         z = prev_z if abs(z_raw - prev_z) < 0.03 else z_raw
 
-        # Kalman predict + update
         x_k = F @ kalman_states[track_id]
         P_k = F @ kalman_covs[track_id] @ F.T + Q
         inn = np.array([z], dtype=np.float32) - (_kalman_H @ x_k)
@@ -316,7 +310,6 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
 
         distance = float(kalman_states[track_id][0])
 
-        # Скорость EMA
         raw_speed = (distance - prev_distances[track_id]) * fps
         prev_distances[track_id] = distance
         speed_state[track_id]    = alpha * raw_speed + (1 - alpha) * speed_state[track_id]
@@ -328,7 +321,6 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
                     "v_filt": float(speed)
                 }
         
-        # TTC и опасность
         ttc    = None
         danger = 0
         if speed < -0.1 and distance > 0:
@@ -338,7 +330,6 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
             elif ttc < TTC_WARNING:
                 danger = 1
 
-        # Коридор безопасности
         real_x = (foot_x - frame_w / 2) * distance / focal_px
         if abs(real_x) > CAR_WIDTH_M / 2:
             danger = min(danger, 1)
@@ -346,11 +337,9 @@ def process_frame(frame: np.ndarray, model, calib_data: dict,
         danger_levels[track_id] = danger
         active_pedestrians[track_id] = (real_x, distance, danger)
 
-        # Сглаживание позиции
         smooth_foot_x[track_id] = alpha_p * foot_x     + (1 - alpha_p) * smooth_foot_x[track_id]
         smooth_foot_y[track_id] = alpha_p * raw_foot_y + (1 - alpha_p) * smooth_foot_y[track_id]
 
-        # Отрисовка бокса
         box_color = {0: (0, 255, 0), 1: (0, 165, 255), 2: (0, 0, 255)}[danger]
         cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 1)
 
@@ -472,7 +461,7 @@ class VideoWorker(QThread):
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps    = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
-        fourcc = cv2.VideoWriter_fourcc(*"avc1")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out    = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
 
         processed = 0
@@ -575,6 +564,7 @@ class MainWindow(QMainWindow):
             return False
         try:
             self.model = YOLO(str(MODEL_PATH))
+            self.model.to('cuda').fuse() 
         except Exception as e:
             QMessageBox.critical(self, "Ошибка загрузки модели", str(e))
             return False
