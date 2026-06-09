@@ -1,7 +1,14 @@
 import os
-os.chdir(r"C:\Users\ruslan\Documents\GitHub\final_qualifying_work\dataset")
 import shutil
 from pathlib import Path
+
+SCRIPT_PATH   = Path(__file__).resolve()
+
+BASE_PATH     = SCRIPT_PATH.parent.parent.parent 
+DATASET_DIR   = BASE_PATH / "dataset"
+
+os.chdir(DATASET_DIR)
+
 import yaml
 import json
 
