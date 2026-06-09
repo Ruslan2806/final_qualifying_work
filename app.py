@@ -1,40 +1,4 @@
-import os
-import sys
-import subprocess
-from pathlib import Path
-
-os.environ['TORCH_CUDA_ARCH_LIST'] = '9.0'
-os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
-
-import torch
-torch.backends.cudnn.enabled = False
-torch.backends.cudnn.benchmark = False
-torch.backends.cuda.matmul.allow_tf32 = False
-
-import json
-import cv2
-import numpy as np
-import time
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QLabel, QFileDialog,
-                             QComboBox, QStackedWidget, QMessageBox, QProgressBar,
-                             QDialog, QFormLayout, QDoubleSpinBox, QCheckBox, QFrame, QSizePolicy)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
-from PyQt5.QtGui import QImage, QPixmap, QPalette, QColor, QFont
-from PyQt5.QtMultimedia import QSoundEffect
-from ultralytics import YOLO
-from PIL import Image, ImageDraw, ImageFont
-
-BASE_PATH        = Path(__file__).resolve().parent
-CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
-MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov12" / "yolov12.pt"
-SETTINGS_PATH = BASE_PATH / "settings.json"
-
-CAR_ICON_PATH = BASE_PATH / "materials" / "car.png"
-DANGER_SOUND_PATH  = BASE_PATH / "materials" / "danger.wav"
-WARNING_SOUND_PATH  = BASE_PATH / "materials" / "warning.wav"
-FONT_PATH = BASE_PATH / "materials" / "font.ttf"
-CAR_ICON = None
+from shared import *
 
 if CAR_ICON_PATH.exists():
     CAR_ICON = cv2.imread(str(CAR_ICON_PATH), cv2.IMREAD_UNCHANGED)
@@ -69,11 +33,7 @@ smooth_foot_x   = {}
 smooth_foot_y   = {}
 danger_levels   = {}
 track_last_seen = {}   
-
 _frame_counter  = 0
-
-MAX_TRACK_AGE   = 90   
-TIME_TO_LOG_CALMAN = 10.0
 
 _kalman_H = np.array([[1, 0]], dtype=np.float32)
 _kalman_R = np.array([[0.05]], dtype=np.float32)
@@ -810,7 +770,7 @@ class MainWindow(QMainWindow):
             self.btn_toggle.setStyleSheet(self._btn("#c0392b"))
 
     def _save_telemetry_json(self):
-        with open("telemetry_log.json", "w") as f:
+        with open(str(TELEMETRY_LOG_PATH), "w") as f:
             json.dump(self.captured_data, f, indent=4)
         QMessageBox.information(self, "Лог сохранен", "Данные записаны в telemetry_log.json")
 

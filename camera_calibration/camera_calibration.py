@@ -1,24 +1,11 @@
-import sys
-import json
 import os
-import numpy as np
-import cv2
-from scipy.optimize import curve_fit
-import matplotlib.pyplot as plt
+import sys
 
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel,
-    QPushButton, QLineEdit, QVBoxLayout, QHBoxLayout,
-    QGroupBox, QScrollArea, QMessageBox, QFileDialog,
-    QGridLayout, QDialog, QComboBox
-)
-from PyQt5.QtCore import Qt, QPoint, pyqtSignal, QTimer
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QPalette
+PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PARENT_DIR not in sys.path:
+    sys.path.insert(0, PARENT_DIR)
 
-DEFAULT_GRID_STEP     = 0.5
-DEFAULT_MAX_DISTANCE  = 10.0
-DEFAULT_CAMERA_HEIGHT = 0.5
-DISPLAY_H             = 800
+from shared import *
 
 class CameraPreview(QDialog):
     frameCaptured = pyqtSignal(np.ndarray)
@@ -218,7 +205,6 @@ class ImageLabel(QLabel):
                 y_disp = int(self.pending_y * s)
                 painter.setBrush(QColor(255, 165, 0))
                 painter.drawEllipse(QPoint(cx, y_disp), 7, 7)
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
