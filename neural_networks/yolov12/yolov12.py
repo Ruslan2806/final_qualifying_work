@@ -20,7 +20,7 @@ DATASET_YAML  = BASE_PATH / "dataset" / "data.yaml"
 MODELS_DIR    = Path(__file__).resolve().parent / "weights"
 RESULTS_DIR   = Path(__file__).resolve().parent / "results"
 
-MODEL_NAME    = "yolov8n.pt"   
+MODEL_NAME    = "yolov12n.pt"   
 EPOCHS        = 100            
 IMG_SIZE      = 640
 BATCH_SIZE    = 16             
@@ -44,7 +44,7 @@ def train():
         lr0     = LEARNING_RATE,
         device  = DEVICE,
         project = str(RESULTS_DIR),
-        name    = "yolov8_pedestrian",
+        name    = "yolov12_pedestrian",
         exist_ok= True,
 
         # Аугментация
@@ -59,16 +59,16 @@ def train():
         patience= 10,    
     )
 
-    best_weights = RESULTS_DIR / "yolov8_pedestrian" / "weights" / "best.pt"
+    best_weights = RESULTS_DIR / "yolov12_pedestrian" / "weights" / "best.pt"
     if best_weights.exists():
-        dest = MODELS_DIR / "yolov8_best.pt"
+        dest = MODELS_DIR / "yolov12_best.pt"
         shutil.copy(best_weights, dest)
         print(f"Best weights saved to: {dest}")
 
     return results
 
 def validate():
-    weights = MODELS_DIR / "yolov8_best.pt"
+    weights = MODELS_DIR / "yolov12_best.pt"
     if not weights.exists():
         return
 
@@ -82,13 +82,13 @@ def validate():
         split   = "val",
         plots   = True,
         project = str(RESULTS_DIR),
-        name    = "yolov8_val",
+        name    = "yolov12_val",
         exist_ok= True,
     )
     return metrics
 
 def test():
-    weights = MODELS_DIR / "yolov8_best.pt"
+    weights = MODELS_DIR / "yolov12_best.pt"
     if not weights.exists():
         return
 
@@ -102,14 +102,14 @@ def test():
         split   = "test",
         plots   = True,
         project = str(RESULTS_DIR),
-        name    = "yolov8_test",
+        name    = "yolov12_test",
         exist_ok= True,
     )
     return metrics
 
 def save_metrics_to_file(val_metrics, test_metrics):
     output = {
-        "model": "YOLOv8n",
+        "model": "YOLOv12",
         "validation": {
             "precision": float(val_metrics.box.p.mean()),
             "recall":    float(val_metrics.box.r.mean()),
@@ -123,7 +123,7 @@ def save_metrics_to_file(val_metrics, test_metrics):
             "mAP50_95":  float(test_metrics.box.map),
         }
     }
-    out_path = RESULTS_DIR / "yolov8_metrics.yaml"
+    out_path = RESULTS_DIR / "yolov12_metrics.yaml"
     with open(out_path, "w") as f:
         yaml.dump(output, f, default_flow_style=False)
     print(f"\nMetrics saved to: {out_path}")

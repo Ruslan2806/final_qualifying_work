@@ -28,9 +28,9 @@ OUTPUT_DIR  = SCRIPT_PATH.parent / "comparison_results"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 MODELS_CONFIG = [
-    {"name": "YOLOv8n", "path": BASE_PATH / "neural_networks/yolov8/weights/yolov8_best.pt", "type": "ultralytics"},
+    {"name": "yolov12n", "path": BASE_PATH / "neural_networks/yolov12/weights/yolov12_best.pt", "type": "ultralytics"},
     {"name": "RT-DETR-L", "path": BASE_PATH / "neural_networks/rf_detr_nano/weights/rtdetr_best.pt", "type": "ultralytics"},
-    {"name": "SSD_MobV3", "path": BASE_PATH / "neural_networks/ssd_mobilenetv2/weights/ssd_best.pt", "type": "ssd"}
+    {"name": "SSD_MobV3", "path": BASE_PATH / "neural_networks/ssd_mobilenetv3/weights/ssd_best.pt", "type": "ssd"}
 ]
 
 def build_ssd_model(num_classes=2):

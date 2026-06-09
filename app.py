@@ -27,19 +27,19 @@ from PIL import Image, ImageDraw, ImageFont
 
 BASE_PATH        = Path(__file__).resolve().parent
 CALIBRATION_PATH = BASE_PATH / "camera_calibration" / "calibration.json"
-MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov8" / "yolov8n.pt"
+MODEL_PATH      = BASE_PATH / "neural_networks" / "yolov12" / "yolov12.pt"
 SETTINGS_PATH = BASE_PATH / "settings.json"
 
-CAR_ICON_PATH = BASE_PATH / "car.png"
+CAR_ICON_PATH = BASE_PATH / "materials" / "car.png"
+DANGER_SOUND_PATH  = BASE_PATH / "materials" / "danger.wav"
+WARNING_SOUND_PATH  = BASE_PATH / "materials" / "warning.wav"
+FONT_PATH = BASE_PATH / "materials" / "font.ttf"
 CAR_ICON = None
 
 if CAR_ICON_PATH.exists():
     CAR_ICON = cv2.imread(str(CAR_ICON_PATH), cv2.IMREAD_UNCHANGED)
     if CAR_ICON is not None:
         max_dim = max(CAR_ICON.shape[:2])
-        #if max_dim > 512:
-        #    scale = 512 / max_dim
-        #    CAR_ICON = cv2.resize(CAR_ICON, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
 def load_settings():
     if SETTINGS_PATH.exists():
@@ -60,7 +60,7 @@ def save_settings(settings):
     with open(SETTINGS_PATH, "w") as f:
         json.dump(settings, f, indent=4)
 
-# ── Глобальные состояния ──────────────────────────────────────────────────────
+# Глобальные состояния 
 prev_distances  = {}
 speed_state     = {}
 kalman_states   = {}
@@ -83,7 +83,6 @@ def get_metric_coordinates(foot_x, distance, frame_w, fh_s, calib_data):
     cam_h = calib_data.get("camera_height_m", 0.5)
     focal_px = fh_s / cam_h
     cx = frame_w / 2
-    # X = (смещение_px) * Z / f
     real_x = (foot_x - cx) * distance / focal_px
     return real_x, distance
 
@@ -203,7 +202,7 @@ def put_russian_text(frame, text, pos, color=(255,255,255)):
     img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(img_pil)
 
-    font = ImageFont.truetype("font.ttf", 24)
+    font = ImageFont.truetype(FONT_PATH, 24)
 
     draw.text(pos, text, font=font, fill=color)
 
@@ -514,7 +513,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Система детекции пешеходов")
-        self.setMinimumSize(1280, 760)
+        self.setMinimumSize(760, 760)
 
         self.settings     = load_settings()
         self.calib_data   = None
@@ -548,14 +547,13 @@ class MainWindow(QMainWindow):
                 self.last_log_capture_time = 0
                 self.is_recording_log = True
         super().keyPressEvent(event)
-    # ── Инициализация ─────────────────────────────────────────────────────────
 
     def _init_sounds(self):
         self.snd_warning = QSoundEffect()
-        self.snd_warning.setSource(QUrl.fromLocalFile("warning.wav"))
+        self.snd_warning.setSource(QUrl.fromLocalFile(str(WARNING_SOUND_PATH)))
         self.snd_warning.setVolume(0.5)
         self.snd_danger  = QSoundEffect()
-        self.snd_danger.setSource(QUrl.fromLocalFile("danger.wav"))
+        self.snd_danger.setSource(QUrl.fromLocalFile(str(DANGER_SOUND_PATH)))
         self.snd_danger.setVolume(0.8)
 
     def _load_resources(self) -> bool:
@@ -582,8 +580,6 @@ class MainWindow(QMainWindow):
                                 "Сначала выполните калибровку камеры.")
             return False
         return True
-
-    # ── Экран меню ────────────────────────────────────────────────────────────
 
     def _build_menu(self):
         w   = QWidget()
@@ -625,7 +621,6 @@ class MainWindow(QMainWindow):
             self.lbl_calib.setText("⚠️  Калибровка не найдена")
             self.lbl_calib.setStyleSheet("font-size:12px; color:#e74c3c;")
 
-    # ── Dashboard ─────────────────────────────────────────────────────────────
 
     def _build_dashboard(self):
         page = QWidget()
@@ -633,7 +628,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(12)
 
-        # ── Зона 1: Видео ─────────────────────────────────────────────────────
         left = QVBoxLayout()
         left.setSpacing(8)
 
@@ -658,7 +652,6 @@ class MainWindow(QMainWindow):
 
         root.addLayout(left, stretch=3)
 
-        # ── Правая колонка ────────────────────────────────────────────────────
         right = QVBoxLayout()
         right.setSpacing(12)
 
@@ -715,7 +708,7 @@ class MainWindow(QMainWindow):
         root.addLayout(right, stretch=1)
 
         self.stack.addWidget(page)
-  #"СНИЖЕНИЕ СКОРОСТИ\nпешеход на траектории движения"
+
     def _set_warn_style(self, danger: int):
         styles = {
             0: ("background:#0a2a0a; border:2px solid #2ecc71; border-radius:10px;",
@@ -729,8 +722,6 @@ class MainWindow(QMainWindow):
         self.warn_panel.setStyleSheet(panel_style)
         self.lbl_warn.setStyleSheet(text_style)
         self.lbl_warn.setText(text)
-
-    # ── Слоты меню ────────────────────────────────────────────────────────────
 
     def _go_video(self):
         if not self._calibration_ready():
@@ -786,8 +777,6 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec_():
             self.settings = load_settings()
-
-    # ── Слоты dashboard ───────────────────────────────────────────────────────
 
     def _detect_cameras(self):
         self.combo_cam.clear()
@@ -910,8 +899,6 @@ class MainWindow(QMainWindow):
             self.cam_thread.stop()
         event.accept()
 
-    # ── Стили ─────────────────────────────────────────────────────────────────
-
     @staticmethod
     def _btn(color: str) -> str:
         return (
@@ -923,9 +910,6 @@ class MainWindow(QMainWindow):
             f"QPushButton:disabled {{ background:#444; color:#888; }}"
             f"QPushButton:hover:enabled {{ background:{color}cc; }}"
         )
-
-
-# ── Точка входа ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
